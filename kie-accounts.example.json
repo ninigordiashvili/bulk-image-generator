@@ -1,0 +1,12 @@
+[
+  {
+    "id": "main",
+    "label": "kie.ai — main",
+    "apiKey": "PASTE_KIE_API_KEY_HERE"
+  },
+  {
+    "id": "second",
+    "label": "kie.ai — second account",
+    "apiKey": "PASTE_SECOND_KIE_API_KEY_HERE"
+  }
+]

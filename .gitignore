@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local kie.ai account config (holds real API keys)
+kie-accounts.json
