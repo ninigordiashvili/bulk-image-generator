@@ -98,7 +98,28 @@ export interface QueueConfig {
   retries: number;
 }
 
-export interface GeneratedImage {
+/**
+ * Where a result was asked for, not when it came back. Completion order is
+ * non-deterministic once more than one job runs at a time, so both galleries
+ * sort on these instead — see `lib/galleryOrder.ts`. Every field is optional:
+ * results stored before this existed have none, and fall back to `createdAt`.
+ */
+export interface GalleryOrderKeys {
+  id: string;
+  createdAt: number;
+  /** The run this belongs to — groups a batch together. */
+  batchId?: string;
+  /** When that run was started. */
+  batchCreatedAt?: number;
+  /** 0-based position within the batch: prompt line, or shot row for video. */
+  promptIndex?: number;
+  /** 0-based index within that prompt's copies. Always 0 for video. */
+  copyIndex?: number;
+  /** 0-based index within the results one task returned. Always 0 for video. */
+  imageIndex?: number;
+}
+
+export interface GeneratedImage extends GalleryOrderKeys {
   id: string;
   /** The queue job that produced it — lets the progress panel total actual spend. */
   jobId: string;
@@ -249,7 +270,7 @@ export interface VideoShot {
   taskId?: string;
 }
 
-export interface GeneratedVideo {
+export interface GeneratedVideo extends GalleryOrderKeys {
   id: string;
   shotId: string;
   prompt: string;

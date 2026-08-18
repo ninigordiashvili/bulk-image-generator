@@ -8,6 +8,7 @@ import {
   loadVideos,
   putVideo,
 } from "@/lib/galleryDb";
+import { insertVideos } from "@/lib/galleryOrder";
 import { creditsPerImage, recordRate, type CreditRates } from "@/lib/pricing";
 import {
   DEFAULT_VIDEO_MODEL,
@@ -264,6 +265,11 @@ export const useVideoStore = create<VideoStore>()(
         const runnable = shots.filter((shot) => shot.prompt.trim().length > 0);
         if (runnable.length === 0) return;
 
+        // Identifies this run so its clips stay grouped and in shot order,
+        // however long individual renders take to come back.
+        const batchCreatedAt = Date.now();
+        const batchId = `batch-${batchCreatedAt}`;
+
         const jobs: GenerationJob[] = runnable.map((shot, index) => ({
           id: shot.id,
           promptId: shot.id,
@@ -368,6 +374,11 @@ export const useVideoStore = create<VideoStore>()(
               aspectRatio: shot.aspectRatio,
               posterBase64: shot.image.base64,
               posterMimeType: shot.image.mimeType,
+              // Requested position, not arrival position — the gallery orders
+              // on these so clips follow the shot rows as entered.
+              batchId,
+              batchCreatedAt,
+              promptIndex: job.promptIndex,
               createdAt: Date.now(),
               credits,
               creditsEstimated,
@@ -376,7 +387,7 @@ export const useVideoStore = create<VideoStore>()(
             };
 
             set((state) => ({
-              videos: [video, ...state.videos],
+              videos: insertVideos(state.videos, video),
               // Only a figure kie actually reported teaches anything; feeding
               // our own estimate back in would just reinforce itself.
               creditRates: creditsEstimated

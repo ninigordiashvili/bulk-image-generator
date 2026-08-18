@@ -1,4 +1,5 @@
 import { openDB, type IDBPDatabase } from "idb";
+import { compareByRequestOrder } from "@/lib/galleryOrder";
 import type { GeneratedImage, GeneratedVideo } from "@/types";
 
 const DB_NAME = "bulk-image-generator";
@@ -41,7 +42,8 @@ export async function loadImages(): Promise<GeneratedImage[]> {
       STORE,
       "createdAt"
     )) as GeneratedImage[];
-    return images.sort((a, b) => b.createdAt - a.createdAt);
+    // Same order as the live gallery: newest batch first, prompt order within it.
+    return images.sort(compareByRequestOrder);
   } catch {
     return [];
   }
@@ -74,7 +76,8 @@ export async function loadVideos(): Promise<GeneratedVideo[]> {
       VIDEO_STORE,
       "createdAt"
     )) as GeneratedVideo[];
-    return videos.sort((a, b) => b.createdAt - a.createdAt);
+    // Same order as the live gallery: newest batch first, shot order within it.
+    return videos.sort(compareByRequestOrder);
   } catch {
     return [];
   }

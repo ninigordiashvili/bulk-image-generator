@@ -5,7 +5,12 @@ import { formatCredits, formatSpend } from "@/lib/pricing";
 import { useVideoStore } from "@/store/videoStore";
 import type { GeneratedVideo } from "@/types";
 
-function fileNameFor(video: GeneratedVideo): string {
+/**
+ * The `index` is the clip's position in the gallery, which is request order —
+ * so the numbers run down the shot list rather than recording who finished
+ * first. Matches the numbering the image ZIP uses.
+ */
+function fileNameFor(video: GeneratedVideo, index?: number): string {
   const slug =
     video.prompt
       .toLowerCase()
@@ -13,7 +18,8 @@ function fileNameFor(video: GeneratedVideo): string {
       .replace(/^-|-$/g, "")
       .slice(0, 48) || "video";
   const extension = video.mimeType.includes("webm") ? "webm" : "mp4";
-  return `${slug}-${video.duration}s-${video.resolution}.${extension}`;
+  const prefix = index === undefined ? "" : `${String(index + 1).padStart(3, "0")}-`;
+  return `${prefix}${slug}-${video.duration}s-${video.resolution}.${extension}`;
 }
 
 function formatSize(bytes: number): string {
@@ -21,7 +27,7 @@ function formatSize(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
-function VideoCard({ video }: { video: GeneratedVideo }) {
+function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
   const removeVideo = useVideoStore((state) => state.removeVideo);
 
   // An object URL per clip, revoked on unmount — without that a gallery of ten
@@ -32,7 +38,7 @@ function VideoCard({ video }: { video: GeneratedVideo }) {
   function download() {
     const link = document.createElement("a");
     link.href = url;
-    link.download = fileNameFor(video);
+    link.download = fileNameFor(video, index);
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -73,7 +79,7 @@ function VideoCard({ video }: { video: GeneratedVideo }) {
             type="button"
             className="badge cursor-pointer hover:bg-black/80"
             onClick={download}
-            title={`Download ${fileNameFor(video)}`}
+            title={`Download ${fileNameFor(video, index)}`}
           >
             ↓ Download
           </button>
@@ -107,11 +113,11 @@ export function VideoGallery() {
     try {
       // Sequential, with a beat between each: ten simultaneous downloads trips
       // Chrome's multiple-download block and most of them are silently dropped.
-      for (const video of videos) {
+      for (const [index, video] of videos.entries()) {
         const url = URL.createObjectURL(video.blob);
         const link = document.createElement("a");
         link.href = url;
-        link.download = fileNameFor(video);
+        link.download = fileNameFor(video, index);
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -167,8 +173,8 @@ export function VideoGallery() {
         </p>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {videos.map((video) => (
-            <VideoCard key={video.id} video={video} />
+          {videos.map((video, index) => (
+            <VideoCard key={video.id} video={video} index={index} />
           ))}
         </div>
       )}

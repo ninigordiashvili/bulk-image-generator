@@ -9,6 +9,7 @@ import {
   putImage,
 } from "@/lib/galleryDb";
 import { isResolutionMismatch } from "@/lib/imageMeta";
+import { insertImages } from "@/lib/galleryOrder";
 import {
   DEFAULT_MODEL,
   findModel,
@@ -325,6 +326,11 @@ export const useGenerationStore = create<GenerationStore>()(
         const prompts = parsePrompts(promptText).slice(0, MAX_PROMPTS);
         if (prompts.length === 0) return;
 
+        // Identifies this run so its images stay grouped and ordered together,
+        // however long individual jobs take to come back.
+        const batchCreatedAt = Date.now();
+        const batchId = `batch-${batchCreatedAt}`;
+
         const jobs: GenerationJob[] = [];
         prompts.forEach((prompt, promptIndex) => {
           const refs = resolveCharactersForPrompt(prompt, characters);
@@ -421,6 +427,13 @@ export const useGenerationStore = create<GenerationStore>()(
                 ),
                 aspectRatio,
                 referencedCharacterIds: job.referencedCharacterIds,
+                // Requested position, not arrival position — the gallery orders
+                // on these so results follow the prompts as typed.
+                batchId,
+                batchCreatedAt,
+                promptIndex: job.promptIndex,
+                copyIndex: job.copyIndex,
+                imageIndex: index,
                 createdAt: Date.now(),
                 credits: perImageCredits,
                 taskId: response.taskId,
@@ -429,7 +442,7 @@ export const useGenerationStore = create<GenerationStore>()(
             });
 
             set((state) => ({
-              images: [...created, ...state.images],
+              images: insertImages(state.images, created),
               // What it actually cost feeds the next estimate — see lib/pricing.
               creditRates: recordRate(
                 state.creditRates,
