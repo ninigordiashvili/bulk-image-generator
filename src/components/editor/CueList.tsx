@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { AVATAR_CONFIDENCE } from "@/lib/editor/analyse";
 import { formatDuration, formatTime } from "@/lib/editor/format";
 import type { Timeline } from "@/lib/editor/timeline";
 import type { EditorImage } from "@/store/editorStore";
@@ -13,11 +14,20 @@ interface Props {
   onRemove: (id: string) => void;
 }
 
+const KIND_LABEL = {
+  still: { text: "still", className: "text-muted" },
+  motion: { text: "motion", className: "text-sky-400" },
+  avatar: { text: "talking", className: "text-emerald-400" },
+} as const;
+
 /**
- * Every image, what its filename resolved to, and how long it ends up on
- * screen. This is where a mis-named file shows itself — the timeline is built
- * entirely out of these names, so being able to read the mapping back is the
- * difference between a puzzling export and an obvious typo.
+ * Every visual, what its filename resolved to, what it was detected as, and how
+ * long it ends up on screen.
+ *
+ * This is where a mis-named file shows itself, and now also where a
+ * mis-*detected* one does: a clip the editor thinks is a motion clip when it's
+ * really a talking head would silently get a zoom and grain over someone's
+ * face, so the guess is shown rather than assumed.
  */
 export function CueList({ images, timeline, disabled, onToggle, onRemove }: Props) {
   const [open, setOpen] = useState(false);
@@ -25,7 +35,7 @@ export function CueList({ images, timeline, disabled, onToggle, onRemove }: Prop
   const spans = useMemo(() => {
     const map = new Map<string, { start: number; end: number }>();
     for (const clip of timeline.clips) {
-      if (clip.imageId) map.set(clip.imageId, { start: clip.start, end: clip.end });
+      if (clip.sourceId) map.set(clip.sourceId, { start: clip.start, end: clip.end });
     }
     return map;
   }, [timeline]);
@@ -44,7 +54,19 @@ export function CueList({ images, timeline, disabled, onToggle, onRemove }: Prop
 
   if (images.length === 0) return null;
 
-  const unreadable = images.filter((image) => image.seconds === null).length;
+  const unreadable = images.filter(
+    (image) => image.seconds === null && image.alignedStart === null
+  ).length;
+  const aligned = images.filter((image) => image.alignedStart !== null).length;
+  // Audio that half-matches is the interesting case: either a clip from a
+  // different take, or a talking clip the match just missed.
+  const suspect = images.filter(
+    (image) =>
+      !image.analysing &&
+      image.kind === "motion" &&
+      image.confidence > 0.2 &&
+      image.confidence < AVATAR_CONFIDENCE
+  );
 
   return (
     <section className="panel space-y-3">
@@ -74,10 +96,23 @@ export function CueList({ images, timeline, disabled, onToggle, onRemove }: Prop
         </ul>
       )}
 
-      {!open && timeline.warnings.length === 0 && (
+      {suspect.length > 0 && (
+        <ul className="space-y-1 rounded-lg border border-sky-500/30 bg-sky-500/10 p-2">
+          {suspect.slice(0, 5).map((image) => (
+            <li key={image.id} className="text-xs text-sky-300">
+              {image.label} — has audio, but it doesn&rsquo;t match the narration
+              ({Math.round(image.confidence * 100)}% match). Treated as a motion
+              clip and placed by its filename.
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {!open && timeline.warnings.length === 0 && suspect.length === 0 && (
         <p className="text-xs text-muted">
           All {images.length} filenames read cleanly
-          {unreadable > 0 ? ` except ${unreadable}` : ""}.
+          {unreadable > 0 ? ` except ${unreadable}` : ""}
+          {aligned > 0 ? `; ${aligned} talking clip${aligned === 1 ? "" : "s"} matched to the narration` : ""}.
         </p>
       )}
 
@@ -87,6 +122,7 @@ export function CueList({ images, timeline, disabled, onToggle, onRemove }: Prop
             <thead className="sticky top-0 bg-surface">
               <tr className="text-xs text-muted">
                 <th className="py-1 pr-2 font-medium">File</th>
+                <th className="py-1 pr-2 font-medium">Kind</th>
                 <th className="py-1 pr-2 font-medium">Cue</th>
                 <th className="py-1 pr-2 font-medium">On screen</th>
                 <th className="py-1 font-medium"></th>
@@ -107,11 +143,32 @@ export function CueList({ images, timeline, disabled, onToggle, onRemove }: Prop
                         {image.label}
                       </span>
                     </td>
-                    <td className="py-1.5 pr-2 font-mono text-xs whitespace-nowrap">
-                      {image.seconds === null ? (
-                        <span className="text-amber-400">no cue</span>
+                    <td className="py-1.5 pr-2 text-xs whitespace-nowrap">
+                      {image.analysing ? (
+                        <span className="text-muted">reading…</span>
                       ) : (
-                        formatTime(image.seconds, true)
+                        <span className={KIND_LABEL[image.kind].className}>
+                          {KIND_LABEL[image.kind].text}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-2 font-mono text-xs whitespace-nowrap">
+                      {image.seconds === null && image.alignedStart === null ? (
+                        <span className="text-amber-400">no cue</span>
+                      ) : image.alignedStart !== null ? (
+                        <span
+                          className="text-emerald-400"
+                          title={
+                            `Matched to the narration at ${formatTime(image.alignedStart, true)}` +
+                            (image.seconds !== null
+                              ? ` — ${Math.abs(image.alignedStart - image.seconds).toFixed(2)}s from what the filename said`
+                              : "")
+                          }
+                        >
+                          {formatTime(image.alignedStart, true)}
+                        </span>
+                      ) : (
+                        formatTime(image.seconds!, true)
                       )}
                     </td>
                     <td className="py-1.5 pr-2 font-mono text-xs whitespace-nowrap text-muted">

@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { formatDuration } from "@/lib/editor/format";
+import { analyseBed } from "@/lib/editor/analyse";
 import { readAudioDuration } from "@/lib/editor/media";
 import type { AudioTrack } from "@/store/editorStore";
-import { MAX_IMAGES } from "@/types/editor";
+import { MAX_IMAGES, VIDEO_EXTENSIONS } from "@/types/editor";
 
 interface Props {
   audio: AudioTrack | null;
@@ -17,6 +18,12 @@ interface Props {
 }
 
 const IMAGE_PATTERN = /\.(png|jpe?g|webp|bmp|tiff?)$/i;
+const VIDEO_PATTERN = new RegExp(`\\.(${VIDEO_EXTENSIONS.join("|")})$`, "i");
+const VISUAL = (file: File) =>
+  IMAGE_PATTERN.test(file.name) ||
+  VIDEO_PATTERN.test(file.name) ||
+  file.type.startsWith("image/") ||
+  file.type.startsWith("video/");
 
 export function MediaIntake({
   audio,
@@ -42,7 +49,10 @@ export function MediaIntake({
     const url = URL.createObjectURL(file);
     try {
       const duration = await readAudioDuration(url);
-      onAudio({ file, name: file.name, duration, url });
+      // Decoded up front: every talking clip is located against this, and
+      // doing it once here beats doing it per clip.
+      const envelope = await analyseBed(file);
+      onAudio({ file, name: file.name, duration, url, envelope });
     } catch (problem) {
       URL.revokeObjectURL(url);
       setError(problem instanceof Error ? problem.message : "Could not read that audio.");
@@ -51,9 +61,7 @@ export function MediaIntake({
 
   /** One drop can hold the audio and the images together — sort them out here. */
   const takeFiles = async (files: File[]) => {
-    const images = files.filter(
-      (file) => IMAGE_PATTERN.test(file.name) || file.type.startsWith("image/")
-    );
+    const images = files.filter(VISUAL);
     const sound = files.find(
       (file) => file.type.startsWith("audio/") || /\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(file.name)
     );
@@ -61,7 +69,7 @@ export function MediaIntake({
     if (images.length > 0) onImages(images);
     if (sound) await takeAudio(sound);
     if (images.length === 0 && !sound) {
-      setError("Nothing in that drop looked like an image or an audio file.");
+      setError("Nothing in that drop looked like an image, a video or an audio file.");
     } else if (images.length > 0) {
       setError(null);
     }
@@ -89,10 +97,13 @@ export function MediaIntake({
           dragging ? "border-accent bg-accent/10" : "border-line bg-surface-2"
         } ${disabled ? "opacity-50" : ""}`}
       >
-        <p className="text-sm text-foreground">Drop your audio and images here</p>
+        <p className="text-sm text-foreground">
+          Drop your audio, images and clips here
+        </p>
         <p className="mt-1 text-xs text-muted">
-          Images are placed by filename — <span className="font-mono">0-00</span>,{" "}
+          Placed by filename — <span className="font-mono">0-00</span>,{" "}
           <span className="font-mono">0-08</span>, <span className="font-mono">1-24</span>.
+          Talking clips find their own position from the audio.
         </p>
 
         <div className="mt-3 flex flex-wrap justify-center gap-2">
@@ -112,10 +123,10 @@ export function MediaIntake({
           </label>
 
           <label className={`pill ${disabled ? "pointer-events-none opacity-50" : "cursor-pointer"}`}>
-            Choose images
+            Choose visuals
             <input
               type="file"
-              accept="image/*"
+              accept="image/*,video/*"
               multiple
               className="hidden"
               disabled={disabled}
@@ -136,12 +147,10 @@ export function MediaIntake({
               className="hidden"
               disabled={disabled}
               onChange={(event) => {
-                const files = [...(event.target.files ?? [])].filter((file) =>
-                  IMAGE_PATTERN.test(file.name)
-                );
+                const files = [...(event.target.files ?? [])].filter(VISUAL);
                 event.target.value = "";
                 if (files.length) onImages(files);
-                else setError("That folder had no images in it.");
+                else setError("That folder had no images or clips in it.");
               }}
             />
           </label>
@@ -174,7 +183,7 @@ export function MediaIntake({
         </div>
 
         <div className="flex items-center justify-between gap-2">
-          <span className="text-muted">Images</span>
+          <span className="text-muted">Visuals</span>
           <span className="flex items-center gap-2">
             <span className="text-foreground">
               {placedCount} placed
@@ -197,7 +206,7 @@ export function MediaIntake({
 
         {imageCount >= MAX_IMAGES && (
           <p className="text-xs text-amber-400">
-            Holding the first {MAX_IMAGES} images — anything past that was ignored.
+            Holding the first {MAX_IMAGES} visuals — anything past that was ignored.
           </p>
         )}
         {error && <p className="text-xs text-red-400">{error}</p>}

@@ -7,11 +7,20 @@ import type { ErrorResponse, UploadResponse } from "@/types/editor";
 
 export const maxDuration = 300;
 
-/** Formats ffmpeg can decode and this workflow actually produces. */
-const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"]);
+/**
+ * Formats ffmpeg can decode and this workflow actually produces. Video is here
+ * alongside stills because a timeline mixes them: generated motion clips and
+ * talking-avatar clips arrive the same way an image does, and are placed by the
+ * same filename cue.
+ */
+const IMAGE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff",
+  "mp4", "mov", "m4v", "webm",
+]);
 const AUDIO_EXTENSIONS = new Set(["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "mp4"]);
 
-const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
+/** Generous: a ten-second 1080p clip is a few megabytes, but 4K is not. */
+const MAX_IMAGE_BYTES = 256 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 512 * 1024 * 1024;
 
 function fail(error: string, status = 400) {
@@ -52,7 +61,8 @@ export async function POST(
   const allowed = kind === "image" ? IMAGE_EXTENSIONS : AUDIO_EXTENSIONS;
   if (!allowed.has(extension)) {
     return fail(
-      `${name || "That file"} isn't a supported ${kind} format (${[...allowed].join(", ")}).`
+      `${name || "That file"} isn't a format the editor can read ` +
+        `(${[...allowed].join(", ")}).`
     );
   }
 

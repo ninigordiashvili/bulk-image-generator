@@ -348,6 +348,75 @@ VideoToolbox serialises on one engine. Measured at 1080p30 it was ~20% slower
 than x264 *and* produced a larger file. It's kept as an option for machines with
 few cores, or when you want the CPU back while a render runs.
 
+## Clips on the timeline
+
+The editor takes video alongside stills, placed by the same filename cue, and
+works out for itself what each one is. That closes the loop: generate the
+stills, generate the talking clips, generate the motion clips, drop the folder,
+export. No assembly by hand.
+
+**Three kinds, detected in the browser.** A dropped `.mp4` is probed with a
+`<video>` element for its length, and its audio track is decoded. No audio track
+at all means a generated motion clip. Audio that correlates with the narration
+bed means a talking avatar. Audio that doesn't correlate is left as a motion
+clip and flagged, because it's usually a clip from a different take.
+
+**Talking clips find their own position.** The filename is a hint, not a
+commitment: the clip carries the audio it was generated from, so cross-
+correlating its loudness envelope against the bed recovers the true offset. In
+testing that's exact — 0 ms error from hints 0.4s, 1.4s and 5.4s out, and from
+no hint at all, surviving a lossy re-encode at a different rate and level. It
+also refuses to guess: unrelated audio scores 0.12 against a real match's 0.95.
+So the manual nudge to line lips up with the bed is gone.
+
+Match on the *speech only*, though. A clip usually ends on a beat of silence the
+bed doesn't have at that moment, and letting that tail into the comparison drags
+a real match below the threshold — which is exactly what happened the first time.
+
+**Talking clips are anchored.** They keep their full length and are never cut
+short; everything else gives way. A still cued underneath one waits until it
+finishes, and a still left with less than `minVisualSeconds` of room is skipped
+rather than flashed, with the next visual taking its slot. A cue that follows an
+anchored clip is treated as stale — the avatar's length came from its speech, not
+from anyone's filename — so the next visual simply follows on instead of leaving
+the screen black.
+
+Two overlapping avatars is the one conflict it won't paper over: pushing the
+second breaks its lip sync, which is the whole point of it, so it warns instead.
+
+**Trailing silence is trimmed.** The clip ends when the mouth stops, not when the
+file does, and the next visual comes in there. Detection is accurate to ~10 ms
+and flat across a −25 to −45 dB threshold, so it needs no tuning. The same
+detection belongs on the audio *before* generating, where it stops you paying
+for silence.
+
+**Motion clips stretch to fill their gap.** The next cue decides the length, so a
+4s clip becomes however long the slot is, with frames invented between the real
+ones rather than repeated. Roughly 70 seconds of render per stretched clip at
+1080p — the single most expensive thing in an export, and capped at `maxStretch`
+because past about 2.5x the invention starts to show around fast movement.
+
+**The audio bed plays throughout.** A talking clip's own audio is discarded: it
+*is* the bed at that moment, so muting it loses nothing and the alignment
+guarantees the lips match. The consequence worth knowing is that a clip
+generated from audio outside the bed would play the bed instead — which is what
+the confidence warning is for.
+
+## Film look
+
+Moving grain, flicker, gate weave, vignette and faded curves, at four strengths.
+The two that sell it only exist in motion: grain that re-randomises every frame
+rather than a fixed overlay, and a pixel or two of gate weave — deliberately
+integer, because real gate weave is a mechanical judder, not a glide.
+
+**Neither the look nor the zoom goes near a talking face.** A zoom on someone
+speaking reads as a mistake, and grain fights the one thing the viewer is trying
+to read. Which kinds get effects is a setting; avatars are excluded in the
+client, and again in the render route, so a hand-made request can't override it.
+
+Grain is noise and noise is what H.264 spends bits on, so a heavy setting grows
+the file noticeably. That's the cost, not a bug.
+
 ## Cost
 
 kie.ai bills in credits, and its docs don't publish a per-model rate — the
@@ -390,15 +459,16 @@ $0.04). Credits are the real unit — check <https://kie.ai> for billed truth.
   second time. Over localhost that's seconds; over the LAN it isn't.
 - **The editor's timeline lives in the tab.** Settings persist to `localStorage`,
   but the files themselves can't — reloading means picking the folder again.
-- **Cuts are hard cuts.** No cross-fades between images, and no per-image zoom
-  overrides; the motion setting applies to the whole edit.
+- **Cuts are hard cuts.** No cross-fades, and no per-clip effect overrides; the
+  motion and film settings apply per kind, not per clip.
+- **Clip detection needs the bed loaded first.** A talking clip dropped before
+  the narration has nothing to correlate against and lands as a motion clip.
+  Loading or changing the audio re-runs the match over every clip, so the fix is
+  to drop the audio and let it settle.
 - **Avatar pricing is unverified.** The Kling avatar models are wired from
   kie's published schema but have not been run here, so their credit cost is
   unknown until the first clip comes back and `creditsConsumed` teaches the rate
   table. Budget the first batch small.
-- **The editor still can't take video.** Avatar clips download cue-named and
-  ready, but `/editor` accepts stills only, so assembling them into a timeline
-  is still a manual job.
 - **Avatar cuts are capped by the request body, not the model.** Kling accepts
   five minutes of audio; a cut has to fit in one request alongside the portrait,
   which in practice means about a minute. Longer cuts drop their sample rate and

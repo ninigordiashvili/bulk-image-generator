@@ -4,6 +4,7 @@ import {
   FPS_CHOICES,
   RESOLUTIONS,
   type Encoder,
+  type FilmLook,
   type LeadIn,
   type RenderSettings,
   type ZoomDirection,
@@ -11,6 +12,9 @@ import {
 
 interface Props {
   settings: RenderSettings;
+  /** Whether any talking clip is loaded — the exemption note only matters then. */
+  hasAvatars: boolean;
+  hasMotion: boolean;
   zoom: ZoomDirection;
   leadIn: LeadIn;
   tailSeconds: number;
@@ -32,6 +36,8 @@ const ZOOM_OPTIONS: { value: ZoomDirection; label: string }[] = [
 
 export function SettingsPanel({
   settings,
+  hasAvatars,
+  hasMotion,
   zoom,
   leadIn,
   tailSeconds,
@@ -87,6 +93,61 @@ export function SettingsPanel({
           </span>
         </label>
 
+      </div>
+
+      <div className="panel space-y-3">
+        <p className="panel-title">Film look</p>
+
+        <div className="grid grid-cols-4 gap-2">
+          {(["off", "subtle", "medium", "heavy"] as FilmLook[]).map((look) => (
+            <button
+              key={look}
+              type="button"
+              disabled={disabled}
+              onClick={() => onSettings({ film: look })}
+              className={`pill capitalize ${settings.film === look ? "pill-active" : ""}`}
+            >
+              {look}
+            </button>
+          ))}
+        </div>
+
+        <p className="text-[11px] text-muted">
+          Grain that moves with the frame, a slight flicker, a pixel or two of
+          gate weave, vignette and faded highlights. Heavier settings grow the
+          file — grain is noise, and noise is what the encoder spends bits on.
+        </p>
+
+        <div className="space-y-1.5 border-t border-line pt-2">
+          <p className="text-[11px] text-muted">Apply the look and the zoom to:</p>
+          <label className="flex items-center gap-2 text-xs text-foreground">
+            <input
+              type="checkbox"
+              checked={settings.effectsOnStills}
+              disabled={disabled}
+              onChange={(event) => onSettings({ effectsOnStills: event.target.checked })}
+              className="accent-[var(--accent)]"
+            />
+            Still images
+          </label>
+          <label className="flex items-center gap-2 text-xs text-foreground">
+            <input
+              type="checkbox"
+              checked={settings.effectsOnMotion}
+              disabled={disabled || !hasMotion}
+              onChange={(event) => onSettings({ effectsOnMotion: event.target.checked })}
+              className="accent-[var(--accent)] disabled:opacity-40"
+            />
+            Motion clips
+            {!hasMotion && <span className="text-muted">— none loaded</span>}
+          </label>
+          <p className="text-[11px] text-muted">
+            Talking clips never take either.{" "}
+            {hasAvatars
+              ? "A zoom on a speaking face reads as a mistake, and grain fights the one thing the viewer is trying to read."
+              : ""}
+          </p>
+        </div>
       </div>
 
       <div className="panel space-y-3">
@@ -161,6 +222,59 @@ export function SettingsPanel({
               <option value="hold">Hold the first image</option>
               <option value="black">Black</option>
             </select>
+          </label>
+        )}
+
+        <label className="block">
+          <span className="flex items-baseline justify-between text-xs text-muted">
+            <span>Shortest visual</span>
+            <span className="font-mono text-foreground">
+              {settings.minVisualSeconds.toFixed(1)}s
+            </span>
+          </span>
+          <input
+            type="range"
+            min={0.5}
+            max={5}
+            step={0.5}
+            value={settings.minVisualSeconds}
+            disabled={disabled}
+            onChange={(event) =>
+              onSettings({ minVisualSeconds: Number(event.target.value) })
+            }
+            className="mt-1 w-full accent-[var(--accent)] disabled:opacity-40"
+          />
+          <span className="text-[11px] text-muted">
+            A talking clip runs to its full length and pushes what follows. An
+            image left with less room than this is skipped rather than flashed,
+            and the next one takes its slot.
+          </span>
+        </label>
+
+        {hasMotion && (
+          <label className="block">
+            <span className="flex items-baseline justify-between text-xs text-muted">
+              <span>Slow motion limit</span>
+              <span className="font-mono text-foreground">
+                {settings.maxStretch.toFixed(1)}×
+              </span>
+            </span>
+            <input
+              type="range"
+              min={1}
+              max={4}
+              step={0.5}
+              value={settings.maxStretch}
+              disabled={disabled}
+              onChange={(event) => onSettings({ maxStretch: Number(event.target.value) })}
+              className="mt-1 w-full accent-[var(--accent)] disabled:opacity-40"
+            />
+            <span className="text-[11px] text-muted">
+              How far a clip may be slowed to fill its gap, with frames invented
+              in between rather than repeated. Past about 2.5× the invention
+              starts to show around fast movement. Roughly 70s of render per
+              stretched clip.
+            </span>
           </label>
         )}
 

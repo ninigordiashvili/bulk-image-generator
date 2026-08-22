@@ -36,14 +36,14 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
   const dismissExport = useEditorStore((state) => state.dismissExport);
 
   const timeline = useMemo(
-    () => selectTimeline({ images, audio, tailSeconds, leadIn }),
-    [images, audio, tailSeconds, leadIn]
+    () => selectTimeline({ images, audio, tailSeconds, leadIn, settings }),
+    [images, audio, tailSeconds, leadIn, settings]
   );
 
   const thumbnails = useThumbnails(images);
   const busy = exportState.phase === "uploading" || exportState.phase === "rendering";
 
-  const firstCue = timeline.clips.find((clip) => clip.imageId)?.start ?? 0;
+  const firstCue = timeline.clips.find((clip) => clip.sourceId)?.start ?? 0;
   const blocker = !renderable
     ? "Rendering needs a local copy — see above."
     : timeline.clips.length === 0
@@ -133,6 +133,8 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
 
           <SettingsPanel
             settings={settings}
+            hasAvatars={images.some((image) => image.kind === "avatar")}
+            hasMotion={images.some((image) => image.kind === "motion")}
             zoom={zoom}
             leadIn={leadIn}
             tailSeconds={tailSeconds}

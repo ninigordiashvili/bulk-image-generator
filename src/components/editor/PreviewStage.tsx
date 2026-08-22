@@ -38,6 +38,7 @@ export function PreviewStage({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const readoutRef = useRef<HTMLSpanElement | null>(null);
 
   const [playing, setPlaying] = useState(false);
@@ -174,18 +175,55 @@ export function PreviewStage({
       context.fillStyle = "#000000";
       context.fillRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
 
-      if (clip?.imageId) {
-        const image = byId.get(clip.imageId);
-        if (image) {
-          cache.request(clip.imageId, image.file);
-          const bitmap = cache.get(clip.imageId);
-          if (bitmap) drawZoomed(context, bitmap, clip.start, clip.end, time, index);
+      const source = clip?.sourceId ? byId.get(clip.sourceId) : null;
+
+      if (clip && source && clip.kind !== "still") {
+        // A video clip is played rather than decoded frame by frame: one
+        // element, its source swapped at each cut. That costs a beat at the
+        // cut itself, which is a fair trade for smooth motion in between.
+        const element = videoRef.current;
+        if (element) {
+          if (element.dataset.clip !== clip.sourceId) {
+            element.dataset.clip = clip.sourceId ?? "";
+            element.src = source.url;
+            element.load();
+          }
+          const slot = clip.end - clip.start;
+          const footage = source.duration ?? slot;
+          // Motion clips are slowed to fill their slot, so preview time runs
+          // slower than wall time by the same factor the render will use.
+          const stretch =
+            clip.kind === "motion" && footage > 0
+              ? Math.min(2.5, Math.max(1, slot / footage))
+              : 1;
+          const want = Math.max(0, Math.min(footage, (time - clip.start) / stretch));
+
+          if (playingRef.current) {
+            if (element.paused) void element.play().catch(() => {});
+            // Only correct real drift; nudging every frame would stutter.
+            if (Math.abs(element.currentTime - want) > 0.2) element.currentTime = want;
+            element.playbackRate = Math.max(0.0625, Math.min(4, 1 / stretch));
+          } else {
+            if (!element.paused) element.pause();
+            if (Math.abs(element.currentTime - want) > 0.02) element.currentTime = want;
+          }
+
+          if (element.readyState >= 2) {
+            drawFitted(context, element, element.videoWidth, element.videoHeight, 1);
+          }
         }
+      } else if (clip?.sourceId && source) {
+        cache.request(clip.sourceId, source.file);
+        const bitmap = cache.get(clip.sourceId);
+        if (bitmap) drawZoomed(context, bitmap, clip.start, clip.end, time, index);
+
         // Warm the next couple so a cut doesn't land on an empty cache.
         for (let ahead = 1; ahead <= PREFETCH; ahead++) {
           const upcoming = clips[index + ahead];
-          const source = upcoming?.imageId ? byId.get(upcoming.imageId) : null;
-          if (upcoming?.imageId && source) cache.request(upcoming.imageId, source.file);
+          const next = upcoming?.sourceId ? byId.get(upcoming.sourceId) : null;
+          if (upcoming?.sourceId && next && upcoming.kind === "still") {
+            cache.request(upcoming.sourceId, next.file);
+          }
         }
       }
 
@@ -205,6 +243,30 @@ export function PreviewStage({
       }
     };
 
+    const drawFitted = (
+      ctx: CanvasRenderingContext2D,
+      source: CanvasImageSource,
+      naturalWidth: number,
+      naturalHeight: number,
+      scale: number
+    ) => {
+      if (!naturalWidth || !naturalHeight) return;
+      // ffmpeg letterboxes into the frame and then magnifies the whole frame
+      // about its centre, so any bars grow with it. Scaling the fitted picture
+      // about the centre of the canvas is the same operation.
+      const fit =
+        Math.min(PREVIEW_WIDTH / naturalWidth, PREVIEW_HEIGHT / naturalHeight) * scale;
+      const width = naturalWidth * fit;
+      const height = naturalHeight * fit;
+      ctx.drawImage(
+        source,
+        (PREVIEW_WIDTH - width) / 2,
+        (PREVIEW_HEIGHT - height) / 2,
+        width,
+        height
+      );
+    };
+
     const drawZoomed = (
       ctx: CanvasRenderingContext2D,
       bitmap: ImageBitmap,
@@ -213,7 +275,7 @@ export function PreviewStage({
       time: number,
       index: number
     ) => {
-      const direction = clipZoom(zoom, index);
+      const direction = clips[index]?.kind === "still" ? clipZoom(zoom, index) : "none";
       const span = Math.max(0.0001, end - start);
       const progress = Math.min(1, Math.max(0, (time - start) / span));
       const scale =
@@ -223,20 +285,7 @@ export function PreviewStage({
             ? 1 + zoomAmount * (1 - progress)
             : 1;
 
-      // ffmpeg letterboxes the image into the frame and then magnifies the
-      // whole frame about its centre, so any bars grow with it. Scaling the
-      // fitted image about the centre of the canvas is the same operation.
-      const fit =
-        Math.min(PREVIEW_WIDTH / bitmap.width, PREVIEW_HEIGHT / bitmap.height) * scale;
-      const width = bitmap.width * fit;
-      const height = bitmap.height * fit;
-      ctx.drawImage(
-        bitmap,
-        (PREVIEW_WIDTH - width) / 2,
-        (PREVIEW_HEIGHT - height) / 2,
-        width,
-        height
-      );
+      drawFitted(ctx, bitmap, bitmap.width, bitmap.height, scale);
     };
 
     frame = requestAnimationFrame(render);
@@ -269,6 +318,8 @@ export function PreviewStage({
             </p>
           </div>
         )}
+        {/* Off-screen, and only ever the source for a canvas draw. */}
+        <video ref={videoRef} muted playsInline preload="auto" className="hidden" />
         {audio && (
           <audio
             key={audio.url}
@@ -291,7 +342,7 @@ export function PreviewStage({
             <div
               key={clip.index}
               className={`absolute top-0 bottom-0 border-l ${
-                clip.imageId ? "border-accent/40" : "border-line bg-black/40"
+                clip.sourceId ? "border-accent/40" : "border-line bg-black/40"
               }`}
               style={{
                 left: `${(clip.start / total) * 100}%`,
