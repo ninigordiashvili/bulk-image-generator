@@ -379,7 +379,8 @@ export const useEditorStore = create<EditorStore>()(
               kind: clip.kind,
               start: clip.start,
               end: clip.end,
-              // Neither the move nor the look goes near a talking face.
+              // Neither the move nor the look goes near a talking face. The
+              // amount differs by kind and is resolved server-side.
               zoom: clip.sourceId && !avatar && effects ? clipZoom(state.zoom, index) : "none",
               film: Boolean(clip.sourceId) && effects && state.settings.film !== "off",
               sourceSeconds: avatar

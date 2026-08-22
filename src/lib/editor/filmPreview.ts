@@ -26,7 +26,6 @@ interface Preset {
   grainPasses: number;
   tileScale: number;
   vignette: number;
-  weave: number;
   flicker: number;
   saturate: number;
   contrast: number;
@@ -39,9 +38,9 @@ interface Preset {
  * the export misleads exactly as much as one with no grain at all.
  */
 const PRESETS: Record<Exclude<FilmLook, "off">, Preset> = {
-  subtle: { grainAlpha: 0.045, grainPasses: 1, tileScale: 1, vignette: 0.28, weave: 1, flicker: 0.012, saturate: 0.9, contrast: 1.03 },
-  medium: { grainAlpha: 0.11, grainPasses: 1, tileScale: 1, vignette: 0.42, weave: 2, flicker: 0.022, saturate: 0.76, contrast: 1.08 },
-  heavy: { grainAlpha: 0.2, grainPasses: 2, tileScale: 1.5, vignette: 0.56, weave: 3, flicker: 0.038, saturate: 0.55, contrast: 1.14 },
+  subtle: { grainAlpha: 0.045, grainPasses: 1, tileScale: 1, vignette: 0.28, flicker: 0.012, saturate: 0.9, contrast: 1.03 },
+  medium: { grainAlpha: 0.11, grainPasses: 1, tileScale: 1, vignette: 0.42, flicker: 0.022, saturate: 0.76, contrast: 1.08 },
+  heavy: { grainAlpha: 0.2, grainPasses: 2, tileScale: 1.5, vignette: 0.56, flicker: 0.038, saturate: 0.55, contrast: 1.14 },
 };
 
 const TILE = 256;
@@ -115,15 +114,12 @@ export function applyLook(
   const flicker =
     1 + preset.flicker * Math.sin(time * 13.1) + preset.flicker * 0.6 * Math.sin(time * 29.7);
 
-  // Gate weave. Whole pixels on purpose: real weave is a mechanical judder,
-  // not a glide, and rounding it is what makes it read as a projector.
+  // No gate weave. A projector really does drift a pixel or two, but over a
+  // slideshow it reads as camera shake rather than as film.
   const frame = Math.round(time * 24);
-  const weaveX = Math.round(preset.weave * Math.sin(frame * 0.7));
-  const weaveY = Math.round(preset.weave * Math.cos(frame * 0.53));
 
   context.save();
   context.filter = `saturate(${preset.saturate}) contrast(${preset.contrast}) brightness(${flicker.toFixed(4)})`;
-  context.translate(weaveX, weaveY);
   paint();
   context.restore();
 

@@ -70,14 +70,14 @@ export function SettingsPanel({
 
         <label className="block">
           <span className="flex items-baseline justify-between text-xs text-muted">
-            <span>Amount</span>
+            <span>Amount — still images</span>
             <span className="font-mono text-foreground">
               {Math.round(settings.zoomAmount * 100)}%
             </span>
           </span>
           <input
             type="range"
-            min={2}
+            min={0}
             max={20}
             step={1}
             value={Math.round(settings.zoomAmount * 100)}
@@ -88,8 +88,35 @@ export function SettingsPanel({
             className="mt-1 w-full accent-[var(--accent)] disabled:opacity-40"
           />
           <span className="text-[11px] text-muted">
-            How much bigger each image ends than it started. 5–10% reads as a
-            slow drift; past that it starts to feel like a push.
+            How much bigger a still ends than it started. 5–10% reads as a slow
+            drift; past that it starts to feel like a push.
+          </span>
+        </label>
+
+        <label className="block">
+          <span className="flex items-baseline justify-between text-xs text-muted">
+            <span>Amount — motion clips</span>
+            <span className="font-mono text-foreground">
+              {Math.round(settings.zoomAmountMotion * 100)}%
+            </span>
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={20}
+            step={1}
+            value={Math.round(settings.zoomAmountMotion * 100)}
+            disabled={disabled || zoom === "none" || !hasMotion}
+            onChange={(event) =>
+              onSettings({ zoomAmountMotion: Number(event.target.value) / 100 })
+            }
+            className="mt-1 w-full accent-[var(--accent)] disabled:opacity-40"
+          />
+          <span className="text-[11px] text-muted">
+            Kept separate because the shot is already moving — what reads as a
+            gentle drift over a still is usually too much on top of footage. 0
+            leaves clips alone.
+            {!hasMotion && " No motion clips loaded."}
           </span>
         </label>
 
@@ -113,9 +140,9 @@ export function SettingsPanel({
         </div>
 
         <p className="text-[11px] text-muted">
-          Grain that moves with the frame, a slight flicker, a pixel or two of
-          gate weave, vignette and faded highlights. Heavier settings grow the
-          file — grain is noise, and noise is what the encoder spends bits on.
+          Grain that moves with the frame, a slight flicker, vignette and faded
+          highlights — no frame shake. Heavier settings grow the file: grain is
+          noise, and noise is what the encoder spends bits on.
         </p>
 
         <div className="space-y-1.5 border-t border-line pt-2">

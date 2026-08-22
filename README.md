@@ -337,7 +337,9 @@ holds no state the generator can see.
 | --- | --- | --- |
 | Resolution | 1080p | 16:9 throughout; 720p/1440p/4K also offered |
 | Frame rate | 30 fps | 24 / 25 / 30 / 60 |
-| Zoom | in, 8% | none / in / out / alternate, 2–20% |
+| Zoom | in | none / in / out / alternate |
+| Zoom amount — stills | 8% | 0–20% |
+| Zoom amount — motion clips | 4% | 0–20%, separate because the shot already moves |
 | Encoder | x264 | see below |
 | Before the first image | hold it | only shown when the first cue isn't 0:00 |
 | Audio fade out | 1.5s | trailing fade on the bed |
@@ -394,6 +396,12 @@ and flat across a −25 to −45 dB threshold, so it needs no tuning. The same
 detection belongs on the audio *before* generating, where it stops you paying
 for silence.
 
+**Motion clips take their own zoom amount.** Kept separate from the stills
+amount because what reads as a gentle drift over a photograph is usually too
+much on top of footage that is already moving; 0 leaves clips alone. Until this
+was added they took no zoom at all — the render's video branch simply had none
+in it, so the setting was accepted and quietly ignored.
+
 **Motion clips stretch to fill their gap.** The next cue decides the length, so a
 4s clip becomes however long the slot is, with frames invented between the real
 ones rather than repeated. Roughly 70 seconds of render per stretched clip at
@@ -408,9 +416,15 @@ the confidence warning is for.
 
 ## Film look
 
-Moving grain, flicker, gate weave, vignette and faded curves, at four strengths,
-**and the preview shows them** — the point of the setting is choosing before you
+Moving grain, flicker, vignette and faded curves, at four strengths, **and the
+preview shows them** — the point of the setting is choosing before you
 export, which is no use if you have to export to see it.
+
+**No gate weave.** A projector really does drift a pixel or two, and it was in
+here on the grounds of authenticity — but over a slideshow of stills it reads as
+camera shake, and shake is not what anyone wants from a film look. Removed from
+both the render and the preview; measured at 0px of frame travel at every
+strength.
 
 The preview isn't the ffmpeg chain and can't be. It has to get the *decision*
 right — whether this shot reads as filmic at this strength — so its grain is

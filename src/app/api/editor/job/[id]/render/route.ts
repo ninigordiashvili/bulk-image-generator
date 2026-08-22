@@ -112,6 +112,7 @@ function validate(
     fps,
     encoder: raw.encoder === "h264_videotoolbox" ? "h264_videotoolbox" : "libx264",
     zoomAmount: clamp(Number(raw.zoomAmount) || 0, 0, 0.5),
+    zoomAmountMotion: clamp(Number(raw.zoomAmountMotion) || 0, 0, 0.5),
     audioFadeOut: clamp(Number(raw.audioFadeOut) || 0, 0, 30),
     fileName: "output.mp4",
     film: FILM_LOOKS.includes(raw.film as FilmLook) ? (raw.film as FilmLook) : "off",

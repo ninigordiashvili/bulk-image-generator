@@ -93,6 +93,7 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
             audio={audio}
             zoom={zoom}
             zoomAmount={settings.zoomAmount}
+            zoomAmountMotion={settings.zoomAmountMotion}
             film={settings.film}
             maxStretch={settings.maxStretch}
             thumbnails={thumbnails}

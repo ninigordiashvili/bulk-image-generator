@@ -35,13 +35,23 @@ export interface RenderSettings {
   height: number;
   fps: number;
   encoder: Encoder;
-  /** Peak extra scale, as a fraction: 0.08 = the image ends 8% larger. */
+  /**
+   * Peak extra scale for a **still**, as a fraction: 0.08 = it ends 8% larger.
+   * Named without a suffix because it predates the split and is what older
+   * saved settings carry; renaming it would silently reset everyone's choice.
+   */
   zoomAmount: number;
+  /**
+   * The same for a **motion clip**. Separate because the shot is already
+   * moving, so the amount that reads as a gentle drift over a still is usually
+   * too much on top of footage.
+   */
+  zoomAmountMotion: number;
   /** Seconds of audio fade at the tail. 0 disables it. */
   audioFadeOut: number;
   fileName: string;
 
-  /** Old-film treatment: moving grain, flicker, gate weave, vignette, fade. */
+  /** Old-film treatment: moving grain, flicker, vignette, faded curves. */
   film: FilmLook;
   /**
    * Which kinds the effects touch. Talking clips are excluded by default and
@@ -143,6 +153,7 @@ export const DEFAULT_SETTINGS: RenderSettings = {
   fps: 30,
   encoder: "libx264",
   zoomAmount: 0.08,
+  zoomAmountMotion: 0.04,
   audioFadeOut: 1.5,
   fileName: "slideshow.mp4",
   film: "off",

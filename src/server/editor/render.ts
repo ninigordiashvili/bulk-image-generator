@@ -109,11 +109,11 @@ function fitChain(width: number, height: number): string {
 export function zoomChain(
   width: number,
   height: number,
-  fps: number,
   frames: number,
   zoom: ClipZoom,
   amount: number
 ): string {
+  if (zoom === "none" || amount <= 0) return "";
   const span = Math.max(1, frames - 1);
   const a = amount.toFixed(4);
   // `on` is the output frame index, so this runs 1 → 1+amount across the clip.
@@ -128,8 +128,9 @@ export function zoomChain(
   const dx = `(${width}/(2*${z}))`;
   const dy = `(${height}/(2*${z}))`;
 
+  // Fit is the caller's job: a still needs it first, a video clip has already
+  // had it, and doing it twice would resample for nothing.
   return (
-    `${fitChain(width, height)},` +
     `perspective=` +
     `x0='${halfX}-${dx}':y0='${halfY}-${dy}':` +
     `x1='${halfX}+${dx}':y1='${halfY}-${dy}':` +
@@ -137,8 +138,7 @@ export function zoomChain(
     `x3='${halfX}+${dx}':y3='${halfY}+${dy}':` +
     // Cubic keeps roughly twice the fine detail of linear here, for about a
     // quarter more time.
-    `sense=source:eval=frame:interpolation=cubic,` +
-    `fps=${fps}`
+    `sense=source:eval=frame:interpolation=cubic`
   );
 }
 
@@ -187,35 +187,25 @@ export function codecArgs(settings: RenderSettings): string[] {
  *    static grain reads as a dirty lens, moving grain reads as film;
  *  - flicker, a slight brightness wobble from two out-of-phase oscillators so
  *    it never settles into an obvious rhythm;
- *  - gate weave, a pixel or two of frame drift. Deliberately integer, because
- *    real gate weave is a mechanical judder, not a smooth glide;
  *  - vignette and faded curves, which are just the look sitting still.
+ *
+ * No gate weave. A real projector drifts a pixel or two and it is authentic,
+ * but over a slideshow of stills it reads as camera shake rather than as film,
+ * and shake is not what anyone is asking a film look for.
  *
  * Grain is noise, and noise is what H.264 spends bits on, so a heavy setting
  * will grow the file noticeably. That's the honest cost, not a bug.
  */
-export function filmChain(look: FilmLook, width: number, height: number): string {
+export function filmChain(look: FilmLook): string {
   if (look === "off") return "";
 
   const preset = {
-    subtle: { grain: 6, vignette: "PI/5", weave: 1, flicker: 0.012, sat: 0.9, contrast: 1.03 },
-    medium: { grain: 13, vignette: "PI/4.2", weave: 2, flicker: 0.022, sat: 0.76, contrast: 1.08 },
-    heavy: { grain: 24, vignette: "PI/3.6", weave: 3, flicker: 0.038, sat: 0.55, contrast: 1.14 },
+    subtle: { grain: 6, vignette: "PI/5", flicker: 0.012, sat: 0.9, contrast: 1.03 },
+    medium: { grain: 13, vignette: "PI/4.2", flicker: 0.022, sat: 0.76, contrast: 1.08 },
+    heavy: { grain: 24, vignette: "PI/3.6", flicker: 0.038, sat: 0.55, contrast: 1.14 },
   }[look];
 
   const parts: string[] = [];
-
-  // Gate weave: overscan slightly, then wander inside the margin. The source is
-  // scaled up first so the wander never exposes an edge.
-  if (preset.weave > 0) {
-    const pad = preset.weave * 2;
-    parts.push(
-      `scale=${width + pad * 2}:${height + pad * 2}:flags=bicubic`,
-      `crop=${width}:${height}:` +
-        `'${pad}+${preset.weave}*sin(n*0.7)+${preset.weave / 2}*sin(n*1.9)':` +
-        `'${pad}+${preset.weave}*cos(n*0.53)+${preset.weave / 2}*cos(n*2.3)'`
-    );
-  }
 
   parts.push(
     `eq=saturation=${preset.sat}:contrast=${preset.contrast}` +
@@ -290,21 +280,27 @@ export function segmentArgs(
     if (segment.sourceSeconds > 0) args.push("-t", segment.sourceSeconds.toFixed(3));
     args.push("-i", segment.source);
     chain = videoChain(width, height, fps, segment.frames, segment.stretch);
-  } else if (segment.zoom === "none") {
-    // A still: one decode, then the same frame held for the whole slot.
-    args.push("-loop", "1", "-framerate", String(fps), "-i", segment.source);
-    chain = `${fitChain(width, height)},fps=${fps}`;
   } else {
     // `-framerate` matters: perspective animates on the frame counter, so the
     // stream has to arrive at the output rate or the move runs at the wrong
     // speed and the segment comes out the wrong length.
     args.push("-loop", "1", "-framerate", String(fps), "-i", segment.source);
-    chain = zoomChain(width, height, fps, segment.frames, segment.zoom, settings.zoomAmount);
+    chain = `${fitChain(width, height)},fps=${fps}`;
+  }
+
+  // The move goes on after the source is fitted and at the output rate — which
+  // is also what lets a motion clip take one. It never did before: the video
+  // branch simply had no zoom in it, so the setting was accepted and ignored.
+  if (segment.source !== null) {
+    const amount =
+      segment.kind === "motion" ? settings.zoomAmountMotion : settings.zoomAmount;
+    const move = zoomChain(width, height, segment.frames, segment.zoom, amount);
+    if (move) chain = `${chain},${move}`;
   }
 
   // The look goes on last, over whatever the clip turned out to be — and only
   // where the settings allow it, which is never on a talking face.
-  const film = segment.film ? filmChain(settings.film, width, height) : "";
+  const film = segment.film ? filmChain(settings.film) : "";
   args.push("-vf", [chain, film, "format=yuv420p"].filter(Boolean).join(","));
 
   args.push(

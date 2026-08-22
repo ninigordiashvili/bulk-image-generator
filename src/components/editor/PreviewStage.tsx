@@ -23,6 +23,7 @@ interface Props {
   audio: AudioTrack | null;
   zoom: ZoomDirection;
   zoomAmount: number;
+  zoomAmountMotion: number;
   film: FilmLook;
   maxStretch: number;
   thumbnails: Map<string, string>;
@@ -35,6 +36,7 @@ export function PreviewStage({
   audio,
   zoom,
   zoomAmount,
+  zoomAmountMotion,
   film,
   maxStretch,
   thumbnails,
@@ -254,8 +256,9 @@ export function PreviewStage({
         }
 
         if (element.readyState >= 2) {
+          const scale = zoomScale(clip, index, time);
           paint = () =>
-            drawFitted(context, element, element.videoWidth, element.videoHeight, 1);
+            drawFitted(context, element, element.videoWidth, element.videoHeight, scale);
         }
 
         // Pause every other clip's element, or four videos play at once.
@@ -266,7 +269,7 @@ export function PreviewStage({
         cache.request(clip.sourceId, source.file);
         const bitmap = cache.get(clip.sourceId);
         if (bitmap) {
-          paint = () => drawZoomed(context, bitmap, clip.start, clip.end, time, index);
+          paint = () => drawZoomed(context, bitmap, clip, time, index);
         }
       } else {
         // A genuine gap — a lead-in. Black is the intent here, not a stall.
@@ -308,6 +311,21 @@ export function PreviewStage({
       }
     };
 
+    /**
+     * How much bigger the picture is at `time`. Stills and motion clips take
+     * their own amounts; a talking face never moves.
+     */
+    const zoomScale = (clip: (typeof clips)[number], index: number, time: number) => {
+      if (clip.kind === "avatar") return 1;
+      const amount = clip.kind === "motion" ? zoomAmountMotion : zoomAmount;
+      if (amount <= 0) return 1;
+      const direction = clipZoom(zoom, index);
+      if (direction === "none") return 1;
+      const span = Math.max(0.0001, clip.end - clip.start);
+      const progress = Math.min(1, Math.max(0, (time - clip.start) / span));
+      return direction === "in" ? 1 + amount * progress : 1 + amount * (1 - progress);
+    };
+
     const drawFitted = (
       ctx: CanvasRenderingContext2D,
       source: CanvasImageSource,
@@ -335,27 +353,19 @@ export function PreviewStage({
     const drawZoomed = (
       ctx: CanvasRenderingContext2D,
       bitmap: ImageBitmap,
-      start: number,
-      end: number,
+      clip: (typeof clips)[number],
       time: number,
       index: number
     ) => {
-      const direction = clips[index]?.kind === "still" ? clipZoom(zoom, index) : "none";
-      const span = Math.max(0.0001, end - start);
-      const progress = Math.min(1, Math.max(0, (time - start) / span));
-      const scale =
-        direction === "in"
-          ? 1 + zoomAmount * progress
-          : direction === "out"
-            ? 1 + zoomAmount * (1 - progress)
-            : 1;
-
-      drawFitted(ctx, bitmap, bitmap.width, bitmap.height, scale);
+      drawFitted(ctx, bitmap, bitmap.width, bitmap.height, zoomScale(clip, index, time));
     };
 
     frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
-  }, [byId, clips, currentTime, total, zoom, zoomAmount, film, maxStretch, videoFor]);
+  }, [
+    byId, clips, currentTime, total,
+    zoom, zoomAmount, zoomAmountMotion, film, maxStretch, videoFor,
+  ]);
 
   const onScrub = (event: React.MouseEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
