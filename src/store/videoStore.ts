@@ -10,11 +10,12 @@ import {
 } from "@/lib/galleryDb";
 import { insertVideos } from "@/lib/galleryOrder";
 import {
-  buildWaveform,
-  hashFile,
-  uploadAudioSource,
-  type AudioSource,
-} from "@/lib/audioSource";
+  CUT_BUDGET_BYTES,
+  decodeTrack,
+  encodeCut,
+  type DecodedAudio,
+  type Waveform,
+} from "@/lib/audioCut";
 import { secondsToCue } from "@/lib/editor/timestamp";
 import { parseTimestamp } from "@/lib/editor/timestamp";
 import { cueTagIn, sanitizeCueTag, stripCueLines } from "@/lib/prompts";
@@ -38,6 +39,20 @@ import {
   type ShotImage,
   type VideoShot,
 } from "@/types";
+
+/**
+ * A voice track loaded this session. The decoded samples are kept because every
+ * cut is sliced out of them here in the browser — there is no server-side copy.
+ */
+export interface AudioSource {
+  id: string;
+  name: string;
+  fileName: string;
+  duration: number;
+  url: string;
+  waveform: Waveform | null;
+  decoded: DecodedAudio | null;
+}
 
 /**
  * What the finished clip is saved as. A `#0-00` line in the shot's prompt wins;
@@ -318,26 +333,21 @@ export const useVideoStore = create<VideoStore>()(
       addAudioSource: async (file) => {
         set({ audioError: null });
         try {
-          const id = await hashFile(file);
+          const id = `${file.name}-${file.size}-${file.lastModified}`;
           const existing = get().audioSources.find((source) => source.id === id);
           if (existing) return existing;
 
-          // The waveform is decoded here and the file is sent to the server in
-          // parallel: the browser needs the peaks to draw, and only the server
-          // can make the cut.
-          const [{ waveform, duration }, serverDuration] = await Promise.all([
-            buildWaveform(file),
-            uploadAudioSource(file, id),
-          ]);
+          // One decode serves both the waveform and every cut taken later.
+          const { decoded, waveform } = await decodeTrack(file);
 
           const source: AudioSource = {
             id,
             name: file.name.replace(/\.[^.]+$/, "").slice(0, 60),
             fileName: file.name,
-            // ffprobe's reading is the one the cut is taken against.
-            duration: serverDuration > 0 ? serverDuration : duration,
+            duration: decoded.duration,
             url: URL.createObjectURL(file),
             waveform,
+            decoded,
           };
           set((state) => ({ audioSources: [...state.audioSources, source] }));
           return source;
@@ -471,7 +481,43 @@ export const useVideoStore = create<VideoStore>()(
             // expensive mistake this app could make.
             let taskId = shot.taskId;
             if (!taskId) {
-              const started = await startVideo(
+              // Encoded per attempt rather than up front: a batch of twenty rows
+            // would otherwise hold twenty multi-megabyte clips in memory at
+            // once, and a retry would reuse a cut the row may have changed.
+            let cut = null;
+            if (isAudioDriven(spec) && shot.audio) {
+              const source = get().audioSources.find(
+                (entry) => entry.id === shot.audio!.sourceId
+              );
+              if (!source?.decoded) {
+                return {
+                  ok: false,
+                  error: "That voice track is no longer loaded — re-add it and try again.",
+                  retryable: false,
+                };
+              }
+              const encoded = await encodeCut(
+                source.decoded,
+                shot.audio.start,
+                shot.audio.duration
+              );
+              // encodeCut already steps the rate down to fit and throws if it
+              // can't; this is the belt to that pair of braces.
+              if (encoded.bytes > CUT_BUDGET_BYTES) {
+                return {
+                  ok: false,
+                  error: `That cut encodes to ${(encoded.bytes / 1024 / 1024).toFixed(1)} MB, too large to send. Shorten it.`,
+                  retryable: false,
+                };
+              }
+              cut = {
+                base64: encoded.base64,
+                mimeType: encoded.mimeType,
+                seconds: encoded.seconds,
+              };
+            }
+
+            const started = await startVideo(
                 {
                   accountId,
                   model: shot.model,
@@ -480,11 +526,7 @@ export const useVideoStore = create<VideoStore>()(
                   duration: shot.duration,
                   resolution: shot.resolution,
                   aspectRatio: shot.aspectRatio,
-                  audio: shot.audio && {
-                    sourceId: shot.audio.sourceId,
-                    start: shot.audio.start,
-                    duration: shot.audio.duration,
-                  },
+                  audio: cut ?? undefined,
                 },
                 { signal }
               );

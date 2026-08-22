@@ -313,6 +313,16 @@ ffmpeg is not a system dependency — `ffmpeg-static` and `ffprobe-static` ship 
 binaries, and `serverExternalPackages` in `next.config.ts` keeps them out of the
 bundle so their paths still resolve.
 
+**The editor only runs locally, and says so on a deployment.** It shells out to
+ffmpeg, keeps a job's uploads on disk between requests, and takes minutes — none
+of which a serverless host offers: instances don't share a filesystem, they're
+recycled between requests, and a function is capped at 300 seconds. The
+binaries alone (388 MB) exceed the 250 MB function limit. So a deployed copy
+detects the host, shows a banner, and disables Export rather than failing with
+"no such editing session" after a few hundred megabytes of upload. The timeline
+and preview still work there, which is enough to check the cue names before
+exporting at home.
+
 **Uploads are chunked into 4 MB pieces.** `src/proxy.ts` matches every route, and
 Next buffers a proxied request body in memory up to 10 MB — past that it
 *truncates silently and serves the request anyway*. A ten-minute WAV sent whole
@@ -389,6 +399,10 @@ $0.04). Credits are the real unit — check <https://kie.ai> for billed truth.
 - **The editor still can't take video.** Avatar clips download cue-named and
   ready, but `/editor` accepts stills only, so assembling them into a timeline
   is still a manual job.
+- **Avatar cuts are capped by the request body, not the model.** Kling accepts
+  five minutes of audio; a cut has to fit in one request alongside the portrait,
+  which in practice means about a minute. Longer cuts drop their sample rate and
+  then refuse.
 - **`imagesPerPrompt` above 1 fights with cues.** Only one file can hold a given
   name, so the extra variants are saved as `0-00 (2).png` and are not placed on
   the timeline — pick the one you want and rename it. Cues are designed for the

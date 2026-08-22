@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { AccountConfigError, findAccount } from "@/server/accounts";
 import { KieError, createTask, createVeoTask, uploadReference } from "@/server/kie";
 import { findVideoModel } from "@/lib/videoModels";
-import { MAX_CUT_SECONDS, cutAudio } from "@/server/audio/clips";
+
+/** kie's ceiling for the avatar models. */
+const MAX_CUT_SECONDS = 300;
 import type { VideoStartRequest, VideoStartResponse } from "@/types";
 
 /** Only creates the task — the long wait happens on the client's terms. */
@@ -35,11 +37,11 @@ export async function POST(request: Request) {
   if (spec.input === "audio") {
     // The voice track is the clip, so it's the one thing that can't be missing.
     // The prompt is optional here — kie requires the field, not its content.
-    if (!audio?.sourceId) return fail(`${spec.label} needs a voice track for this shot.`);
-    if (!(audio.duration > 0)) return fail("That audio cut has no length.");
-    if (audio.duration > MAX_CUT_SECONDS) {
+    if (!audio?.base64) return fail(`${spec.label} needs a voice track for this shot.`);
+    if (!(audio.seconds > 0)) return fail("That audio cut has no length.");
+    if (audio.seconds > MAX_CUT_SECONDS) {
       return fail(
-        `${spec.label} accepts at most ${MAX_CUT_SECONDS / 60} minutes of audio; this cut is ${Math.round(audio.duration)}s.`
+        `${spec.label} accepts at most ${MAX_CUT_SECONDS / 60} minutes of audio; this cut is ${Math.round(audio.seconds)}s.`
       );
     }
   } else {
@@ -77,19 +79,13 @@ export async function POST(request: Request) {
     );
 
     if (spec.input === "audio") {
-      // Cut on the server rather than in the browser: ffmpeg is already here,
-      // it can cut to the millisecond instead of the nearest frame, and it
-      // hands back a 240 KB AAC clip instead of a multi-megabyte WAV.
-      const cut = await cutAudio(
-        audio!.sourceId,
-        audio!.start,
-        audio!.duration,
-        request.signal
-      );
+      // The browser sends the cut already made. Nothing here is stored between
+      // requests, which is what lets this work on a host where consecutive
+      // requests land on different machines.
       const audioUrl = await uploadReference(
         account.apiKey,
-        cut.base64,
-        cut.mimeType,
+        audio!.base64,
+        audio!.mimeType,
         request.signal
       );
 
