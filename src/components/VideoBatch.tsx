@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadShotImage } from "@/lib/imageFile";
+import { formatTime } from "@/lib/editor/format";
 import { creditsPerImage, formatCredits, formatUsd, creditsToUsd } from "@/lib/pricing";
-import { VIDEO_MODELS, videoModel } from "@/lib/videoModels";
+import { VIDEO_MODELS, isAudioDriven, videoModel } from "@/lib/videoModels";
 import { isRunning, useGenerationStore } from "@/store/generationStore";
-import { useVideoStore } from "@/store/videoStore";
+import { isRunnable, shotSize, useVideoStore } from "@/store/videoStore";
 import { MAX_SHOTS } from "@/types";
 import { VideoGallery } from "./VideoGallery";
 import { VideoShotRow } from "./VideoShotRow";
@@ -24,6 +25,20 @@ export function VideoBatch() {
   const addShots = useVideoStore((state) => state.addShots);
   const clearShots = useVideoStore((state) => state.clearShots);
   const applyToAll = useVideoStore((state) => state.applyToAll);
+  const audioSources = useVideoStore((state) => state.audioSources);
+  const audioError = useVideoStore((state) => state.audioError);
+  const addAudioSource = useVideoStore((state) => state.addAudioSource);
+  const removeAudioSource = useVideoStore((state) => state.removeAudioSource);
+  const applyAudioSourceToAll = useVideoStore((state) => state.applyAudioSourceToAll);
+  const [loadingAudio, setLoadingAudio] = useState(false);
+
+  /** The voice-track shelf only appears once a row actually needs one. */
+  const anyAudioModel = useMemo(
+    () =>
+      isAudioDriven(videoModel(defaults.model)) ||
+      shots.some((shot) => isAudioDriven(videoModel(shot.model))),
+    [defaults.model, shots]
+  );
   const setConcurrency = useVideoStore((state) => state.setConcurrency);
   const setRetries = useVideoStore((state) => state.setRetries);
   const startGeneration = useVideoStore((state) => state.startGeneration);
@@ -49,8 +64,10 @@ export function VideoBatch() {
     [jobs]
   );
 
-  const ready = shots.filter((shot) => shot.prompt.trim().length > 0);
-  const missingPrompts = shots.length - ready.length;
+  // What "ready" means depends on the row's model: a prompt for the animators,
+  // a voice cut for the avatars.
+  const ready = shots.filter(isRunnable);
+  const notReady = shots.length - ready.length;
 
   // Each row can be a different model at a different length, so the estimate is
   // a sum over rows rather than count × rate. Rows on a model that has never run
@@ -59,11 +76,7 @@ export function VideoBatch() {
     let known = 0;
     let unknown = 0;
     for (const shot of ready) {
-      const rate = creditsPerImage(
-        shot.model,
-        { duration: shot.duration, resolution: shot.resolution },
-        creditRates
-      );
+      const rate = creditsPerImage(shot.model, shotSize(shot), creditRates);
       if (rate === null) unknown++;
       else known += rate;
     }
@@ -115,10 +128,10 @@ export function VideoBatch() {
           <h2 className="panel-title mb-0">Storyboard</h2>
           <span className="text-[11px] text-muted">
             {shots.length} / {MAX_SHOTS} shots
-            {missingPrompts > 0 && (
+            {notReady > 0 && (
               <span className="text-amber-400">
                 {" "}
-                · {missingPrompts} without a prompt
+                · {notReady} not ready yet
               </span>
             )}
           </span>
@@ -163,6 +176,76 @@ export function VideoBatch() {
 
         {error && <p className="mt-2 text-xs text-amber-400">{error}</p>}
 
+        {/* Voice tracks live here rather than on a row, because one recording
+            usually feeds many rows — each taking its own cut out of it. */}
+        {(anyAudioModel || audioSources.length > 0) && (
+          <div className="mt-3 space-y-2 rounded-lg border border-line bg-surface px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] text-muted">Voice tracks:</span>
+              {audioSources.map((source) => (
+                <span
+                  key={source.id}
+                  className="flex items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-2 py-0.5 text-[11px]"
+                >
+                  <span className="max-w-[16rem] truncate" title={source.fileName}>
+                    {source.fileName}
+                  </span>
+                  <span className="font-mono text-muted">{formatTime(source.duration)}</span>
+                  <button
+                    type="button"
+                    disabled={running || shots.length === 0}
+                    onClick={() => applyAudioSourceToAll(source.id)}
+                    className="text-muted hover:text-foreground disabled:opacity-40"
+                    title="Give every row this track — each row still keeps its own cut"
+                  >
+                    → all rows
+                  </button>
+                  <button
+                    type="button"
+                    disabled={running}
+                    onClick={() => removeAudioSource(source.id)}
+                    className="text-muted hover:text-red-400 disabled:opacity-40"
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+              <label
+                className={`pill px-2 py-0.5 text-[11px] ${
+                  running || loadingAudio ? "pointer-events-none opacity-50" : "cursor-pointer"
+                }`}
+              >
+                {loadingAudio ? "Reading…" : "+ Add audio"}
+                <input
+                  type="file"
+                  accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus"
+                  multiple
+                  className="hidden"
+                  disabled={running || loadingAudio}
+                  onChange={async (event) => {
+                    const files = [...(event.target.files ?? [])];
+                    event.target.value = "";
+                    if (files.length === 0) return;
+                    setLoadingAudio(true);
+                    try {
+                      for (const file of files) await addAudioSource(file);
+                    } finally {
+                      setLoadingAudio(false);
+                    }
+                  }}
+                />
+              </label>
+            </div>
+            {audioSources.length === 0 && (
+              <p className="text-[11px] text-muted">
+                Load a recording, then each avatar row cuts the seconds it needs
+                out of it.
+              </p>
+            )}
+            {audioError && <p className="text-[11px] text-red-400">{audioError}</p>}
+          </div>
+        )}
+
         {shots.length > 0 && (
           <>
             {/* Setting ten rows by hand is the tedious part; this is the shortcut. */}
@@ -180,7 +263,9 @@ export function VideoBatch() {
                   {model.label}
                 </button>
               ))}
-              <span className="mx-1 text-line">|</span>
+              {videoModel(defaults.model).durations.length > 0 && (
+                <span className="mx-1 text-line">|</span>
+              )}
               {videoModel(defaults.model).durations.map((duration) => (
                 <button
                   key={duration}
@@ -192,7 +277,9 @@ export function VideoBatch() {
                   {duration}s
                 </button>
               ))}
-              <span className="mx-1 text-line">|</span>
+              {videoModel(defaults.model).resolutions.length > 0 && (
+                <span className="mx-1 text-line">|</span>
+              )}
               {videoModel(defaults.model).resolutions.map((resolution) => (
                 <button
                   key={resolution}

@@ -17,7 +17,16 @@ export function extensionFor(mimeType: string): string {
   return "png";
 }
 
+/**
+ * A `#0-00` cue on the prompt names the file outright — no index prefix, no
+ * slug — because the whole point is that the name is data: the video editor
+ * reads it back as the timestamp to place the image at. Everything else keeps
+ * the numbered slug, which is only ever for a human scanning a folder.
+ */
 export function fileNameFor(image: GeneratedImage, index?: number): string {
+  const extension = extensionFor(image.mimeType);
+  if (image.tag) return `${image.tag}.${extension}`;
+
   const slug =
     image.prompt
       .toLowerCase()
@@ -26,7 +35,24 @@ export function fileNameFor(image: GeneratedImage, index?: number): string {
       .replace(/^-|-$/g, "")
       .slice(0, 48) || "image";
   const prefix = index === undefined ? "" : `${String(index + 1).padStart(3, "0")}-`;
-  return `${prefix}${slug}.${extensionFor(image.mimeType)}`;
+  return `${prefix}${slug}.${extension}`;
+}
+
+/**
+ * Makes `name` unique against `used`, as `0-00 (2).png`. Deliberately not a
+ * form the editor's timestamp parser accepts: when one cue produced several
+ * images only one of them can hold that moment, so the extras land in the
+ * folder unplaced, for you to pick between and rename.
+ */
+export function uniqueName(name: string, used: Set<string>): string {
+  if (!used.has(name)) return name;
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : "";
+  for (let n = 2; ; n++) {
+    const candidate = `${stem} (${n})${extension}`;
+    if (!used.has(candidate)) return candidate;
+  }
 }
 
 function triggerDownload(blob: Blob, fileName: string) {
@@ -62,8 +88,7 @@ export async function downloadAllAsZip(
   const usedNames = new Set<string>();
 
   images.forEach((image, index) => {
-    let name = fileNameFor(image, index);
-    while (usedNames.has(name)) name = `dup-${name}`;
+    const name = uniqueName(fileNameFor(image, index), usedNames);
     usedNames.add(name);
     zip.file(name, image.base64, { base64: true });
     onProgress?.({ current: index + 1, total: images.length, phase: "packing" });

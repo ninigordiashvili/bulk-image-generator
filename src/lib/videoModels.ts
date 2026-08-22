@@ -15,10 +15,21 @@
 /** Which kie API a model is reached through — they poll differently too. */
 export type VideoApi = "veo" | "jobs";
 
+/**
+ * What supplies the clip's content and length.
+ *
+ * `prompt` models animate a still for a length you pick. `audio` models are
+ * talking avatars: they lip-sync the still to a voice track, so the audio *is*
+ * the clip — its length, its pacing, its content — and duration, resolution and
+ * aspect ratio aren't theirs to choose.
+ */
+export type VideoInput = "prompt" | "audio";
+
 export interface VideoModelSpec {
   id: string;
   label: string;
   api: VideoApi;
+  input: VideoInput;
   /** Model string sent in the request body. */
   requestModel: string;
   docUrl: string;
@@ -30,6 +41,13 @@ export interface VideoModelSpec {
   aspectRatios: readonly string[];
   defaultAspectRatio: string;
   blurb: string;
+  /** Longest audio the model accepts, for `audio` models only. */
+  maxAudioSeconds?: number;
+}
+
+/** True when a row needs an audio cut rather than a duration. */
+export function isAudioDriven(spec: VideoModelSpec): boolean {
+  return spec.input === "audio";
 }
 
 /** 6–30s at 1s steps, per the Grok schema. */
@@ -40,6 +58,7 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     id: "veo3_lite",
     label: "Veo 3.1 Lite",
     api: "veo",
+    input: "prompt",
     requestModel: "veo3_lite",
     docUrl: "https://docs.kie.ai/veo3-api/generate-veo-3-video",
     durations: [4, 6, 8],
@@ -54,6 +73,7 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     id: "grok-imagine/image-to-video",
     label: "Grok Image-to-Video",
     api: "jobs",
+    input: "prompt",
     requestModel: "grok-imagine/image-to-video",
     docUrl: "https://docs.kie.ai/market/grok-imagine/image-to-video",
     durations: GROK_DURATIONS,
@@ -63,6 +83,40 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     aspectRatios: ["16:9", "9:16", "1:1", "3:2", "2:3"],
     defaultAspectRatio: "16:9",
     blurb: "xAI Grok Imagine. Much longer clips (up to 30s), lower resolution ceiling.",
+  },
+  {
+    // Audio-driven, so every size field below is empty on purpose: the model
+    // takes image_url + audio_url + prompt and nothing else.
+    id: "kling/ai-avatar-standard",
+    label: "Kling AI Avatar (Standard)",
+    api: "jobs",
+    input: "audio",
+    requestModel: "kling/ai-avatar-standard",
+    docUrl: "https://docs.kie.ai/market/kling/ai-avatar-standard",
+    durations: [],
+    defaultDuration: 0,
+    resolutions: [],
+    defaultResolution: "",
+    aspectRatios: [],
+    defaultAspectRatio: "",
+    maxAudioSeconds: 300,
+    blurb: "Talking avatar: lip-syncs a portrait to a voice track. Length comes from the audio.",
+  },
+  {
+    id: "kling/ai-avatar-pro",
+    label: "Kling AI Avatar (Pro)",
+    api: "jobs",
+    input: "audio",
+    requestModel: "kling/ai-avatar-pro",
+    docUrl: "https://docs.kie.ai/market/kling/ai-avatar-pro",
+    durations: [],
+    defaultDuration: 0,
+    resolutions: [],
+    defaultResolution: "",
+    aspectRatios: [],
+    defaultAspectRatio: "",
+    maxAudioSeconds: 300,
+    blurb: "The same avatar model at higher fidelity, for more credits per second.",
   },
 ];
 
@@ -87,6 +141,10 @@ export function clampToModel(
   spec: VideoModelSpec,
   settings: { duration: number; resolution: string; aspectRatio: string }
 ): { duration: number; resolution: string; aspectRatio: string } {
+  // An audio-driven model has no size options to snap to, and its row keeps
+  // whatever the other models left behind so switching back is lossless.
+  if (spec.input === "audio") return settings;
+
   const duration = spec.durations.includes(settings.duration)
     ? settings.duration
     : nearest(spec.durations, settings.duration);

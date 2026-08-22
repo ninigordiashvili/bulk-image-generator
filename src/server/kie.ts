@@ -311,6 +311,22 @@ export function uploadReference(
   return pending;
 }
 
+/**
+ * kie serves the uploaded file back by URL, and some of its models sniff the
+ * type from the extension rather than the header — so this has to be right for
+ * audio as well as images.
+ */
+function extensionForUpload(mimeType: string): string {
+  if (mimeType.includes("png")) return "png";
+  if (mimeType.includes("webp")) return "webp";
+  if (mimeType.includes("mpeg")) return "mp3";
+  if (mimeType.includes("wav")) return "wav";
+  if (mimeType.includes("aac")) return "aac";
+  if (mimeType.includes("ogg")) return "ogg";
+  if (mimeType.includes("audio/mp4") || mimeType.includes("m4a")) return "m4a";
+  return "jpg";
+}
+
 async function performUpload(
   apiKey: string,
   base64: string,
@@ -318,11 +334,7 @@ async function performUpload(
   digest: string,
   signal?: AbortSignal
 ): Promise<string> {
-  const extension = mimeType.includes("png")
-    ? "png"
-    : mimeType.includes("webp")
-      ? "webp"
-      : "jpg";
+  const extension = extensionForUpload(mimeType);
 
   let response: Response;
   try {
@@ -334,7 +346,9 @@ async function performUpload(
       },
       body: JSON.stringify({
         base64Data: `data:${mimeType};base64,${base64}`,
-        uploadPath: "images/bulk-image-generator",
+        uploadPath: mimeType.startsWith("audio/")
+          ? "audio/bulk-image-generator"
+          : "images/bulk-image-generator",
         fileName: `ref-${digest}.${extension}`,
       }),
       signal,
@@ -344,7 +358,7 @@ async function performUpload(
       throw new KieError("Cancelled.", false);
     }
     throw new KieError(
-      `Could not upload the reference image to kie.ai: ${
+      `Could not upload the file to kie.ai: ${
         error instanceof Error ? error.message : String(error)
       }`,
       true
@@ -359,7 +373,7 @@ async function performUpload(
   if (!response.ok || !url) {
     const code = payload?.code ?? response.status;
     throw new KieError(
-      `Reference image upload failed — ${describeCode(code, payload?.msg ?? response.statusText)}`,
+      `Upload to kie.ai failed — ${describeCode(code, payload?.msg ?? response.statusText)}`,
       isRetryableCode(code)
     );
   }
