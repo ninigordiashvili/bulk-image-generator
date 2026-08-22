@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatTime } from "@/lib/editor/format";
+import { applyLook } from "@/lib/editor/filmPreview";
 import { BitmapCache } from "@/lib/editor/media";
 import { clipAt, clipZoom, type Timeline } from "@/lib/editor/timeline";
 import type { AudioTrack, EditorImage } from "@/store/editorStore";
-import type { ZoomDirection } from "@/types/editor";
+import type { FilmLook, ZoomDirection } from "@/types/editor";
 import { Filmstrip } from "./Filmstrip";
 
 /** The canvas the preview draws into. Fixed, and independent of export size —
@@ -22,6 +23,8 @@ interface Props {
   audio: AudioTrack | null;
   zoom: ZoomDirection;
   zoomAmount: number;
+  film: FilmLook;
+  maxStretch: number;
   thumbnails: Map<string, string>;
   onToggleImage: (id: string) => void;
 }
@@ -32,13 +35,20 @@ export function PreviewStage({
   audio,
   zoom,
   zoomAmount,
+  film,
+  maxStretch,
   thumbnails,
   onToggleImage,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  /**
+   * One `<video>` per clip, kept warm. Swapping a single element's `src` at
+   * each cut drops it back to "nothing decoded yet", and the canvas had
+   * nowhere to draw from — which is what put black frames between clips.
+   */
+  const videosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const readoutRef = useRef<HTMLSpanElement | null>(null);
 
   const [playing, setPlaying] = useState(false);
@@ -57,6 +67,49 @@ export function PreviewStage({
     for (const image of images) map.set(image.id, image);
     return map;
   }, [images]);
+
+  /** Elements are cheap to hold and expensive to warm up; a few is plenty. */
+  const VIDEO_POOL = 4;
+
+  const videoFor = useCallback((id: string, url: string): HTMLVideoElement => {
+    const pool = videosRef.current;
+    const existing = pool.get(id);
+    if (existing) {
+      // Re-inserting makes the map its own least-recently-used order.
+      pool.delete(id);
+      pool.set(id, existing);
+      return existing;
+    }
+
+    const element = document.createElement("video");
+    element.src = url;
+    element.muted = true;
+    element.playsInline = true;
+    element.preload = "auto";
+    element.load();
+    pool.set(id, element);
+
+    while (pool.size > VIDEO_POOL) {
+      const oldest = pool.keys().next();
+      if (oldest.done) break;
+      const stale = pool.get(oldest.value);
+      stale?.pause();
+      stale?.removeAttribute("src");
+      pool.delete(oldest.value);
+    }
+    return element;
+  }, []);
+
+  useEffect(() => {
+    const pool = videosRef.current;
+    return () => {
+      for (const element of pool.values()) {
+        element.pause();
+        element.removeAttribute("src");
+      }
+      pool.clear();
+    };
+  }, []);
 
   const cacheRef = useRef<BitmapCache | null>(null);
   useEffect(() => {
@@ -171,60 +224,72 @@ export function PreviewStage({
 
       const index = clipAt(clips, time);
       const clip = index >= 0 ? clips[index] : null;
-
-      context.fillStyle = "#000000";
-      context.fillRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
-
       const source = clip?.sourceId ? byId.get(clip.sourceId) : null;
 
+      // What to paint, decided before anything is cleared. Leaving the last
+      // good frame up while a clip warms is the whole point: clearing first and
+      // finding nothing ready is what produced black between visuals.
+      let paint: (() => void) | null = null;
+
       if (clip && source && clip.kind !== "still") {
-        // A video clip is played rather than decoded frame by frame: one
-        // element, its source swapped at each cut. That costs a beat at the
-        // cut itself, which is a fair trade for smooth motion in between.
-        const element = videoRef.current;
-        if (element) {
-          if (element.dataset.clip !== clip.sourceId) {
-            element.dataset.clip = clip.sourceId ?? "";
-            element.src = source.url;
-            element.load();
-          }
-          const slot = clip.end - clip.start;
-          const footage = source.duration ?? slot;
-          // Motion clips are slowed to fill their slot, so preview time runs
-          // slower than wall time by the same factor the render will use.
-          const stretch =
-            clip.kind === "motion" && footage > 0
-              ? Math.min(2.5, Math.max(1, slot / footage))
-              : 1;
-          const want = Math.max(0, Math.min(footage, (time - clip.start) / stretch));
+        const element = videoFor(clip.sourceId!, source.url);
+        const slot = clip.end - clip.start;
+        const footage = source.duration ?? slot;
+        // Motion clips are slowed to fill their slot, so preview time runs
+        // slower than wall time by the same factor the render will use.
+        const stretch =
+          clip.kind === "motion" && footage > 0
+            ? Math.min(maxStretch, Math.max(1, slot / footage))
+            : 1;
+        const want = Math.max(0, Math.min(footage, (time - clip.start) / stretch));
 
-          if (playingRef.current) {
-            if (element.paused) void element.play().catch(() => {});
-            // Only correct real drift; nudging every frame would stutter.
-            if (Math.abs(element.currentTime - want) > 0.2) element.currentTime = want;
-            element.playbackRate = Math.max(0.0625, Math.min(4, 1 / stretch));
-          } else {
-            if (!element.paused) element.pause();
-            if (Math.abs(element.currentTime - want) > 0.02) element.currentTime = want;
-          }
+        if (playingRef.current) {
+          if (element.paused) void element.play().catch(() => {});
+          // Only correct real drift; nudging every frame would stutter.
+          if (Math.abs(element.currentTime - want) > 0.2) element.currentTime = want;
+          element.playbackRate = Math.max(0.0625, Math.min(4, 1 / stretch));
+        } else {
+          if (!element.paused) element.pause();
+          if (Math.abs(element.currentTime - want) > 0.02) element.currentTime = want;
+        }
 
-          if (element.readyState >= 2) {
+        if (element.readyState >= 2) {
+          paint = () =>
             drawFitted(context, element, element.videoWidth, element.videoHeight, 1);
-          }
+        }
+
+        // Pause every other clip's element, or four videos play at once.
+        for (const [id, other] of videosRef.current) {
+          if (id !== clip.sourceId && !other.paused) other.pause();
         }
       } else if (clip?.sourceId && source) {
         cache.request(clip.sourceId, source.file);
         const bitmap = cache.get(clip.sourceId);
-        if (bitmap) drawZoomed(context, bitmap, clip.start, clip.end, time, index);
-
-        // Warm the next couple so a cut doesn't land on an empty cache.
-        for (let ahead = 1; ahead <= PREFETCH; ahead++) {
-          const upcoming = clips[index + ahead];
-          const next = upcoming?.sourceId ? byId.get(upcoming.sourceId) : null;
-          if (upcoming?.sourceId && next && upcoming.kind === "still") {
-            cache.request(upcoming.sourceId, next.file);
-          }
+        if (bitmap) {
+          paint = () => drawZoomed(context, bitmap, clip.start, clip.end, time, index);
         }
+      } else {
+        // A genuine gap — a lead-in. Black is the intent here, not a stall.
+        paint = () => {};
+      }
+
+      // Warm what's coming: the next stills decoded, the next clips buffered.
+      for (let ahead = 1; ahead <= PREFETCH; ahead++) {
+        const upcoming = clips[index + ahead];
+        const next = upcoming?.sourceId ? byId.get(upcoming.sourceId) : null;
+        if (!upcoming?.sourceId || !next) continue;
+        if (upcoming.kind === "still") cache.request(upcoming.sourceId, next.file);
+        else videoFor(upcoming.sourceId, next.url);
+      }
+
+      if (paint) {
+        context.filter = "none";
+        context.globalAlpha = 1;
+        context.fillStyle = "#000000";
+        context.fillRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+        // Only stills and motion clips wear the look, exactly as they do in
+        // the render — a talking face takes neither grain nor zoom.
+        applyLook(context, clip && clip.kind !== "avatar" ? film : "off", time, paint);
       }
 
       if (playheadRef.current && total > 0) {
@@ -290,7 +355,7 @@ export function PreviewStage({
 
     frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
-  }, [byId, clips, currentTime, total, zoom, zoomAmount]);
+  }, [byId, clips, currentTime, total, zoom, zoomAmount, film, maxStretch, videoFor]);
 
   const onScrub = (event: React.MouseEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -318,8 +383,6 @@ export function PreviewStage({
             </p>
           </div>
         )}
-        {/* Off-screen, and only ever the source for a canvas draw. */}
-        <video ref={videoRef} muted playsInline preload="auto" className="hidden" />
         {audio && (
           <audio
             key={audio.url}

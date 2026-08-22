@@ -237,34 +237,19 @@ export function buildTimeline({
     });
   }
 
-  // An anchored clip that finished before the audio did leaves a hole; the
-  // visual before it can't fill it (it already played), so it reads as black.
+  // Nothing black between visuals. A hole can only survive the pull-back when
+  // both sides are anchored, and the honest fix there is the warning above, not
+  // a flash of black — so the earlier clip holds its last frame across it.
   for (let i = 1; i < clips.length; i++) {
     if (clips[i].start - clips[i - 1].end > 0.001) {
-      clips.splice(i, 0, {
-        sourceId: null,
-        label: "Gap",
-        kind: "still",
-        start: clips[i - 1].end,
-        end: clips[i].start,
-        index: 0,
-        anchored: false,
-      });
-      i++;
+      clips[i - 1].end = clips[i].start;
     }
   }
+
+  // Same at the end: an avatar that stops talking before the narration does
+  // holds rather than cutting to black.
   const lastClip = clips[clips.length - 1];
-  if (lastClip && lastClip.end < total - 0.001 && lastClip.anchored) {
-    clips.push({
-      sourceId: null,
-      label: "Gap",
-      kind: "still",
-      start: lastClip.end,
-      end: total,
-      index: 0,
-      anchored: false,
-    });
-  }
+  if (lastClip && lastClip.end < total - 0.001) lastClip.end = total;
 
   clips.forEach((clip, i) => (clip.index = i));
 

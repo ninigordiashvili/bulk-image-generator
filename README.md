@@ -376,10 +376,14 @@ a real match below the threshold — which is exactly what happened the first ti
 **Talking clips are anchored.** They keep their full length and are never cut
 short; everything else gives way. A still cued underneath one waits until it
 finishes, and a still left with less than `minVisualSeconds` of room is skipped
-rather than flashed, with the next visual taking its slot. A cue that follows an
-anchored clip is treated as stale — the avatar's length came from its speech, not
-from anyone's filename — so the next visual simply follows on instead of leaving
-the screen black.
+rather than flashed, with the next visual taking its slot.
+
+**Never black between visuals.** A cue that follows a clip is treated as stale —
+the clip's length came from its speech or from how far it stretched, not from
+anyone's filename — so the next visual is pulled back to meet it rather than
+waiting for its own timestamp. The last visual runs to the end of the audio for
+the same reason. The only black left is a lead-in before the first visual, where
+there is genuinely nothing to show.
 
 Two overlapping avatars is the one conflict it won't paper over: pushing the
 second breaks its lip sync, which is the whole point of it, so it warns instead.
@@ -404,7 +408,24 @@ the confidence warning is for.
 
 ## Film look
 
-Moving grain, flicker, gate weave, vignette and faded curves, at four strengths.
+Moving grain, flicker, gate weave, vignette and faded curves, at four strengths,
+**and the preview shows them** — the point of the setting is choosing before you
+export, which is no use if you have to export to see it.
+
+The preview isn't the ffmpeg chain and can't be. It has to get the *decision*
+right — whether this shot reads as filmic at this strength — so its grain is
+calibrated against the render rather than picked by eye: sigma 3.3 / 8.2 / 12.8
+on the canvas against the render's 3.5 / 7.5 / 13. Grain is pre-rendered into
+tiles and blitted at a moving offset rather than generated per pixel, which
+would cost more than everything else in the preview put together.
+
+Two things that took measuring. Blending mid-grey noise with `overlay` — the
+obvious approach — is nearly a no-op on a dark image, which is exactly where
+grain should show; splitting it into a bright half added with `lighter` and a
+dark half blended over approximates ffmpeg's signed additive noise and survives
+any exposure. And alpha saturates, so past a point more opacity stops adding
+variance: heavy needs a second pass to land meaningfully coarser than medium
+rather than a hair above it.
 The two that sell it only exist in motion: grain that re-randomises every frame
 rather than a fixed overlay, and a pixel or two of gate weave — deliberately
 integer, because real gate weave is a mechanical judder, not a glide.
@@ -461,6 +482,9 @@ $0.04). Credits are the real unit — check <https://kie.ai> for billed truth.
   but the files themselves can't — reloading means picking the folder again.
 - **Cuts are hard cuts.** No cross-fades, and no per-clip effect overrides; the
   motion and film settings apply per kind, not per clip.
+- **The preview's film look is an approximation.** Calibrated to the render's
+  grain strength, but canvas filters aren't ffmpeg's `curves` — the tint will
+  differ slightly. The export is the authority.
 - **Settings are merged, not replaced, on load.** `settings` persists as one
   object, and zustand's default merge swaps it wholesale — so a browser holding
   it from an older build comes back missing every field added since, and the
