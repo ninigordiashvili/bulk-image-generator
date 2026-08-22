@@ -468,6 +468,21 @@ export const useEditorStore = create<EditorStore>()(
         tailSeconds: state.tailSeconds,
         fileName: state.fileName,
       }),
+      /**
+       * `settings` is one stored object, and the default merge replaces it
+       * wholesale — so a browser holding settings from an older build comes
+       * back missing every field added since, and the first render that reads
+       * one throws. Layering the stored values over the current defaults means
+       * a new setting arrives with its default instead of as `undefined`.
+       */
+      merge: (persisted, current) => {
+        const saved = (persisted ?? {}) as Partial<PersistedSettings>;
+        return {
+          ...current,
+          ...saved,
+          settings: { ...DEFAULT_SETTINGS, ...(saved.settings ?? {}) },
+        };
+      },
     }
   )
 );

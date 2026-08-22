@@ -685,6 +685,20 @@ export const useVideoStore = create<VideoStore>()(
         retries: state.retries,
         creditRates: state.creditRates,
       }),
+      /**
+       * `defaults` is stored as one object and the default merge replaces it
+       * whole, so a browser holding it from an older build would come back
+       * missing any field added since. Layering it over the current defaults
+       * means a new one arrives with its default rather than as `undefined`.
+       */
+      merge: (persisted, current) => {
+        const saved = (persisted ?? {}) as Partial<typeof current>;
+        return {
+          ...current,
+          ...saved,
+          defaults: { ...current.defaults, ...(saved.defaults ?? {}) },
+        };
+      },
     }
   )
 );

@@ -461,6 +461,13 @@ $0.04). Credits are the real unit — check <https://kie.ai> for billed truth.
   but the files themselves can't — reloading means picking the folder again.
 - **Cuts are hard cuts.** No cross-fades, and no per-clip effect overrides; the
   motion and film settings apply per kind, not per clip.
+- **Settings are merged, not replaced, on load.** `settings` persists as one
+  object, and zustand's default merge swaps it wholesale — so a browser holding
+  it from an older build comes back missing every field added since, and the
+  first render that reads one throws. Both stores layer the saved values over
+  the current defaults instead. Bumping `version` is *not* the fix: without a
+  `migrate` it discards the saved state, which stops the crash by resetting
+  everything the user chose.
 - **Clip detection needs the bed loaded first.** A talking clip dropped before
   the narration has nothing to correlate against and lands as a motion clip.
   Loading or changing the audio re-runs the match over every clip, so the fix is
