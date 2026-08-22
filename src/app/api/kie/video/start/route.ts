@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { AccountConfigError, findAccount } from "@/server/accounts";
 import { KieError, createTask, createVeoTask, uploadReference } from "@/server/kie";
 import { findVideoModel } from "@/lib/videoModels";
+import { MAX_CUT_SECONDS, cutAudio } from "@/server/audio/clips";
 import type { VideoStartRequest, VideoStartResponse } from "@/types";
 
 /** Only creates the task — the long wait happens on the client's terms. */
@@ -22,23 +23,37 @@ export async function POST(request: Request) {
     return fail("Malformed request body.");
   }
 
-  const { accountId, model, prompt, image, duration, resolution, aspectRatio } = body;
+  const { accountId, model, prompt, image, duration, resolution, aspectRatio, audio } =
+    body;
 
   if (!accountId) return fail("No account selected.");
   if (!image?.base64) return fail("No source image for this shot.");
-  if (!prompt?.trim()) return fail("Prompt is empty.");
 
   const spec = findVideoModel(model);
   if (!spec) return fail(`Unknown video model "${model}".`);
-  if (!spec.durations.includes(duration)) {
-    return fail(
-      `${spec.label} does not support ${duration}s clips. Allowed: ${spec.durations.join(", ")}s.`
-    );
-  }
-  if (!spec.resolutions.includes(resolution)) {
-    return fail(
-      `${spec.label} does not support ${resolution}. Allowed: ${spec.resolutions.join(", ")}.`
-    );
+
+  if (spec.input === "audio") {
+    // The voice track is the clip, so it's the one thing that can't be missing.
+    // The prompt is optional here — kie requires the field, not its content.
+    if (!audio?.sourceId) return fail(`${spec.label} needs a voice track for this shot.`);
+    if (!(audio.duration > 0)) return fail("That audio cut has no length.");
+    if (audio.duration > MAX_CUT_SECONDS) {
+      return fail(
+        `${spec.label} accepts at most ${MAX_CUT_SECONDS / 60} minutes of audio; this cut is ${Math.round(audio.duration)}s.`
+      );
+    }
+  } else {
+    if (!prompt?.trim()) return fail("Prompt is empty.");
+    if (!spec.durations.includes(duration)) {
+      return fail(
+        `${spec.label} does not support ${duration}s clips. Allowed: ${spec.durations.join(", ")}s.`
+      );
+    }
+    if (!spec.resolutions.includes(resolution)) {
+      return fail(
+        `${spec.label} does not support ${resolution}. Allowed: ${spec.resolutions.join(", ")}.`
+      );
+    }
   }
 
   let account;
@@ -60,6 +75,38 @@ export async function POST(request: Request) {
       image.mimeType,
       request.signal
     );
+
+    if (spec.input === "audio") {
+      // Cut on the server rather than in the browser: ffmpeg is already here,
+      // it can cut to the millisecond instead of the nearest frame, and it
+      // hands back a 240 KB AAC clip instead of a multi-megabyte WAV.
+      const cut = await cutAudio(
+        audio!.sourceId,
+        audio!.start,
+        audio!.duration,
+        request.signal
+      );
+      const audioUrl = await uploadReference(
+        account.apiKey,
+        cut.base64,
+        cut.mimeType,
+        request.signal
+      );
+
+      const taskId = await createTask(
+        account.apiKey,
+        spec.requestModel,
+        {
+          image_url: imageUrl,
+          audio_url: audioUrl,
+          // Required by the schema, but an empty string is valid and the model
+          // is driven by the audio, so an absent prompt is not an error.
+          prompt: prompt?.trim() ?? "",
+        },
+        request.signal
+      );
+      return NextResponse.json<VideoStartResponse>({ ok: true, taskId });
+    }
 
     if (spec.api === "veo") {
       const taskId = await createVeoTask(

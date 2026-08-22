@@ -9,10 +9,20 @@ import {
   putVideo,
 } from "@/lib/galleryDb";
 import { insertVideos } from "@/lib/galleryOrder";
+import {
+  buildWaveform,
+  hashFile,
+  uploadAudioSource,
+  type AudioSource,
+} from "@/lib/audioSource";
+import { secondsToCue } from "@/lib/editor/timestamp";
+import { parseTimestamp } from "@/lib/editor/timestamp";
+import { cueTagIn, sanitizeCueTag, stripCueLines } from "@/lib/prompts";
 import { creditsPerImage, recordRate, type CreditRates } from "@/lib/pricing";
 import {
   DEFAULT_VIDEO_MODEL,
   clampToModel,
+  isAudioDriven,
   videoModel,
 } from "@/lib/videoModels";
 import { GenerationQueue } from "@/services/GenerationQueue";
@@ -24,9 +34,70 @@ import {
   type GenerationJob,
   type QueueProgress,
   type QueueState,
+  type ShotAudio,
   type ShotImage,
   type VideoShot,
 } from "@/types";
+
+/**
+ * What the finished clip is saved as. A `#0-00` line in the shot's prompt wins;
+ * failing that, a source still that is itself named for a timestamp passes its
+ * name on — animate `0-00.png` and you get `0-00.mp4`, so a batch of clips can
+ * go straight back onto the video editor's timeline.
+ *
+ * A still with an ordinary name is left alone: only a name the editor would
+ * actually read as a cue is worth propagating.
+ */
+function shotTag(shot: {
+  prompt: string;
+  image: { name: string };
+  audio?: ShotAudio;
+}): string | undefined {
+  const fromPrompt = cueTagIn(shot.prompt);
+  if (fromPrompt) return fromPrompt;
+
+  // A talking clip is defined by its voice track, so it takes that track's name
+  // plus where in it the cut was taken: narration_1-35.mp4 from 1:35 of
+  // narration.mp3. The suffix is in the app's own cue form, so the clip also
+  // drops straight onto the video editor's timeline at that moment.
+  if (shot.audio) {
+    const stem = sanitizeCueTag(shot.audio.name) ?? "audio";
+    return `${stem}_${secondsToCue(shot.audio.start)}`;
+  }
+
+  if (parseTimestamp(shot.image.name) === null) return undefined;
+  return sanitizeCueTag(shot.image.name) ?? undefined;
+}
+
+/**
+ * A row is ready when it has what its model actually needs. A talking-avatar
+ * row is driven by its voice track, so an empty prompt is fine and a missing
+ * cut is not — the reverse of every other model here.
+ */
+/**
+ * How long the finished clip will be, and at what size.
+ *
+ * An avatar row has no duration or resolution of its own — the voice track sets
+ * the length — but the gallery still has to label the clip, and the learned
+ * credit rates are keyed on these. Reporting the row's stale prompt-model
+ * duration would mislabel every talking clip and poison the rate table.
+ */
+export function shotSize(shot: VideoShot): { duration: number; resolution: string } {
+  if (isAudioDriven(videoModel(shot.model))) {
+    return {
+      duration: Math.round((shot.audio?.duration ?? 0) * 10) / 10,
+      resolution: "avatar",
+    };
+  }
+  return { duration: shot.duration, resolution: shot.resolution };
+}
+
+export function isRunnable(shot: VideoShot): boolean {
+  if (isAudioDriven(videoModel(shot.model))) {
+    return Boolean(shot.audio && shot.audio.duration > 0);
+  }
+  return shot.prompt.trim().length > 0;
+}
 
 const EMPTY_PROGRESS: QueueProgress = {
   total: 0,
@@ -52,6 +123,10 @@ interface VideoStore {
   retries: number;
   creditRates: CreditRates;
 
+  /** Voice tracks loaded this session, shared by every row that cuts from one. */
+  audioSources: AudioSource[];
+  audioError: string | null;
+
   videos: GeneratedVideo[];
   galleryHydrated: boolean;
 
@@ -65,6 +140,10 @@ interface VideoStore {
   removeShot: (id: string) => void;
   clearShots: () => void;
   applyToAll: (settings: Partial<ShotSettings>) => void;
+  addAudioSource: (file: File) => Promise<AudioSource | null>;
+  removeAudioSource: (id: string) => void;
+  setShotAudio: (id: string, audio: ShotAudio | undefined) => void;
+  applyAudioSourceToAll: (sourceId: string) => void;
   setDefaults: (patch: Partial<ShotSettings>) => void;
   setConcurrency: (value: number) => void;
   setRetries: (value: number) => void;
@@ -180,6 +259,9 @@ export const useVideoStore = create<VideoStore>()(
       retries: 1,
       creditRates: {},
 
+      audioSources: [],
+      audioError: null,
+
       videos: [],
       galleryHydrated: false,
 
@@ -233,6 +315,91 @@ export const useVideoStore = create<VideoStore>()(
 
       clearShots: () => set({ shots: [] }),
 
+      addAudioSource: async (file) => {
+        set({ audioError: null });
+        try {
+          const id = await hashFile(file);
+          const existing = get().audioSources.find((source) => source.id === id);
+          if (existing) return existing;
+
+          // The waveform is decoded here and the file is sent to the server in
+          // parallel: the browser needs the peaks to draw, and only the server
+          // can make the cut.
+          const [{ waveform, duration }, serverDuration] = await Promise.all([
+            buildWaveform(file),
+            uploadAudioSource(file, id),
+          ]);
+
+          const source: AudioSource = {
+            id,
+            name: file.name.replace(/\.[^.]+$/, "").slice(0, 60),
+            fileName: file.name,
+            // ffprobe's reading is the one the cut is taken against.
+            duration: serverDuration > 0 ? serverDuration : duration,
+            url: URL.createObjectURL(file),
+            waveform,
+          };
+          set((state) => ({ audioSources: [...state.audioSources, source] }));
+          return source;
+        } catch (error) {
+          set({
+            audioError:
+              error instanceof Error ? error.message : "Could not read that audio file.",
+          });
+          return null;
+        }
+      },
+
+      removeAudioSource: (id) =>
+        set((state) => {
+          const source = state.audioSources.find((entry) => entry.id === id);
+          if (source) URL.revokeObjectURL(source.url);
+          return {
+            audioSources: state.audioSources.filter((entry) => entry.id !== id),
+            // Rows pointing at a track that's gone would fail at generation
+            // time with a confusing server error; clear them now instead.
+            shots: state.shots.map((shot) =>
+              shot.audio?.sourceId === id ? { ...shot, audio: undefined } : shot
+            ),
+          };
+        }),
+
+      setShotAudio: (id, audio) =>
+        set((state) => ({
+          shots: state.shots.map((shot) =>
+            shot.id === id
+              ? // Changing the voice track changes the render, so any task
+                // already running for this row is the wrong clip now.
+                { ...shot, audio, taskId: undefined }
+              : shot
+          ),
+        })),
+
+      applyAudioSourceToAll: (sourceId) =>
+        set((state) => {
+          const source = state.audioSources.find((entry) => entry.id === sourceId);
+          if (!source) return {};
+          const length = Math.min(15, source.duration);
+          return {
+            shots: state.shots.map((shot) =>
+              shot.audio?.sourceId === sourceId
+                ? shot
+                : {
+                    ...shot,
+                    // Only the track is shared; every row still picks its own
+                    // moment, which is the whole point of the trimmer.
+                    audio: {
+                      sourceId,
+                      name: source.name,
+                      start: shot.audio?.start ?? 0,
+                      duration: shot.audio?.duration ?? length,
+                    },
+                    taskId: undefined,
+                  }
+            ),
+          };
+        }),
+
       applyToAll: (settings) => {
         set((state) => ({
           shots: state.shots.map((shot) => reconcileShot({ ...shot, ...settings })),
@@ -262,7 +429,7 @@ export const useVideoStore = create<VideoStore>()(
 
       startGeneration: () => {
         const { shots, concurrency, retries } = get();
-        const runnable = shots.filter((shot) => shot.prompt.trim().length > 0);
+        const runnable = shots.filter(isRunnable);
         if (runnable.length === 0) return;
 
         // Identifies this run so its clips stay grouped and in shot order,
@@ -276,6 +443,7 @@ export const useVideoStore = create<VideoStore>()(
           prompt: shot.prompt,
           promptIndex: index,
           copyIndex: 0,
+          tag: shotTag(shot) ?? null,
           referencedCharacterIds: [],
           status: "queued",
           attempts: 0,
@@ -307,11 +475,16 @@ export const useVideoStore = create<VideoStore>()(
                 {
                   accountId,
                   model: shot.model,
-                  prompt: shot.prompt,
+                  prompt: stripCueLines(shot.prompt),
                   image: { base64: shot.image.base64, mimeType: shot.image.mimeType },
                   duration: shot.duration,
                   resolution: shot.resolution,
                   aspectRatio: shot.aspectRatio,
+                  audio: shot.audio && {
+                    sourceId: shot.audio.sourceId,
+                    start: shot.audio.start,
+                    duration: shot.audio.duration,
+                  },
                 },
                 { signal }
               );
@@ -355,7 +528,7 @@ export const useVideoStore = create<VideoStore>()(
             const credits = creditsEstimated
               ? (creditsPerImage(
                   shot.model,
-                  { duration: shot.duration, resolution: shot.resolution },
+                  shotSize(shot),
                   get().creditRates
                 ) ?? 0)
               : reported;
@@ -363,7 +536,8 @@ export const useVideoStore = create<VideoStore>()(
             const video: GeneratedVideo = {
               id: `${shot.id}@${Date.now()}`,
               shotId: shot.id,
-              prompt: shot.prompt,
+              prompt: stripCueLines(shot.prompt),
+              tag: shotTag(shot),
               model: shot.model,
               modelLabel: spec.label,
               mimeType: file.blob.type || "video/mp4",
@@ -395,7 +569,7 @@ export const useVideoStore = create<VideoStore>()(
                 : recordRate(
                     state.creditRates,
                     shot.model,
-                    { duration: shot.duration, resolution: shot.resolution },
+                    shotSize(shot),
                     reported,
                     1
                   ),

@@ -1,13 +1,24 @@
 "use client";
 
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { CHARACTER_TAG_RE, parsePrompts } from "@/lib/prompts";
+import { CHARACTER_TAG_RE, cueIssues, isCueLine, parsePrompts } from "@/lib/prompts";
 import { useGenerationStore } from "@/store/generationStore";
 import { findModel, referenceLimit } from "@/lib/kieModels";
 import { MAX_PROMPTS, MAX_PROMPT_CHARS } from "@/types";
 
 /** Splits a line into plain text and `@N` tokens, marking tokens with no character. */
 function highlightLine(line: string, knownIds: Set<number>): ReactNode[] {
+  // A cue line is a filename, not prompt text, and reads better as one block.
+  if (isCueLine(line)) {
+    return [
+      <mark
+        key="cue"
+        className="rounded-sm bg-emerald-500/25 text-transparent underline decoration-emerald-400 decoration-2 underline-offset-2"
+      >
+        {line}
+      </mark>,
+    ];
+  }
   const nodes: ReactNode[] = [];
   let cursor = 0;
   for (const match of line.matchAll(CHARACTER_TAG_RE)) {
@@ -47,22 +58,24 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
   );
 
   const lines = useMemo(() => promptText.split("\n"), [promptText]);
-  const nonBlank = useMemo(
-    () => lines.filter((line) => line.trim().length > 0),
-    [lines],
-  );
-  const overLength = nonBlank.filter((line) => line.length > MAX_PROMPT_CHARS);
+  // One parse feeds every counter and warning below, so the panel can never
+  // disagree with what the queue is about to run.
+  const prompts = useMemo(() => parsePrompts(promptText), [promptText]);
+  const tagged = useMemo(() => prompts.filter((prompt) => prompt.tag), [prompts]);
+  const issues = useMemo(() => cueIssues(promptText), [promptText]);
+
+  const overLength = prompts.filter((prompt) => prompt.raw.length > MAX_PROMPT_CHARS);
   const unknownTags = useMemo(() => {
     const unknown = new Set<string>();
-    for (const line of nonBlank) {
-      for (const match of line.matchAll(CHARACTER_TAG_RE)) {
+    for (const prompt of prompts) {
+      for (const match of prompt.raw.matchAll(CHARACTER_TAG_RE)) {
         if (!knownIds.has(Number(match[1]))) unknown.add(match[0]);
       }
     }
     return [...unknown];
-  }, [nonBlank, knownIds]);
+  }, [prompts, knownIds]);
 
-  const overPromptLimit = nonBlank.length > MAX_PROMPTS;
+  const overPromptLimit = prompts.length > MAX_PROMPTS;
 
   // Pinned + tagged characters are merged per prompt; anything past what the
   // selected model accepts on one call would be silently dropped.
@@ -72,14 +85,14 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
     const pinned = characters
       .filter((character) => character.pinned)
       .map((c) => c.id);
-    return parsePrompts(promptText).filter(
+    return prompts.filter(
       (prompt) =>
         new Set([
           ...pinned,
           ...prompt.referencedCharacterIds.filter((id) => knownIds.has(id)),
         ]).size > refLimit,
     ).length;
-  }, [promptText, characters, knownIds, refLimit]);
+  }, [prompts, characters, knownIds, refLimit]);
 
   // The opposite failure, and the quieter one: references are uploaded but none
   // reach the model, because the prompt describes them in prose ("the attached
@@ -88,20 +101,25 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
   const promptsWithoutRefs = useMemo(() => {
     if (characters.length === 0 || refLimit === 0) return 0;
     if (characters.some((character) => character.pinned)) return 0;
-    return parsePrompts(promptText).filter(
+    return prompts.filter(
       (prompt) =>
         prompt.referencedCharacterIds.filter((id) => knownIds.has(id)).length === 0,
     ).length;
-  }, [promptText, characters, knownIds, refLimit]);
+  }, [prompts, characters, knownIds, refLimit]);
 
   return (
     <section className="panel">
       <div className="mb-3 flex items-baseline justify-between gap-3">
-        <h2 className="panel-title mb-0">Prompts — one per line</h2>
+        <h2 className="panel-title mb-0">
+          Prompts — {tagged.length > 0 ? "one per #cue" : "one per line"}
+        </h2>
         <span
           className={`text-xs ${overPromptLimit ? "text-red-400" : "text-muted"}`}
         >
-          {nonBlank.length} / {MAX_PROMPTS}
+          {tagged.length > 0 && (
+            <span className="text-emerald-400">{tagged.length} named · </span>
+          )}
+          {prompts.length} / {MAX_PROMPTS}
         </span>
       </div>
 
@@ -138,7 +156,7 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
             }
           }}
           placeholder={
-            "@1 and @2 sitting in a cafe, @1 is laughing\n@1 walking home under streetlights\nwide shot of the empty cafe at dawn"
+            "#0-00\nWolves howling on a dark ridge above an empty valley at night\n\n#0-05\nSmall canvas wall tent pitched on a grassy bench above a creek\n\n— or one prompt per line, with no #cues, to name files by their text"
           }
           className="relative w-full resize-y bg-transparent px-3 py-2 font-mono text-sm leading-6 text-foreground caret-white outline-none placeholder:text-muted disabled:cursor-not-allowed"
         />
@@ -147,7 +165,7 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
       <div className="mt-2 space-y-1 text-xs">
         {overPromptLimit && (
           <p className="text-red-400">
-            {nonBlank.length} prompts — over the {MAX_PROMPTS} limit. Only the
+            {prompts.length} prompts — over the {MAX_PROMPTS} limit. Only the
             first {MAX_PROMPTS} would run; trim the list.
           </p>
         )}
@@ -181,13 +199,46 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
             {unknownTags.join(", ")} — no such reference image uploaded.
           </p>
         )}
+        {issues.empty.length > 0 && (
+          <p className="text-red-400">
+            Cue{issues.empty.length === 1 ? "" : "s"} with no prompt underneath:{" "}
+            {issues.empty.map((tag) => `#${tag}`).join(", ")} — nothing will be
+            generated for {issues.empty.length === 1 ? "it" : "them"}.
+          </p>
+        )}
+        {issues.duplicates.length > 0 && (
+          <p className="text-amber-400">
+            Repeated cue{issues.duplicates.length === 1 ? "" : "s"}:{" "}
+            {issues.duplicates.map((tag) => `#${tag}`).join(", ")} — two images
+            can&rsquo;t share a filename, so the later one is saved as{" "}
+            <span className="font-mono">{issues.duplicates[0]} (2)</span> and
+            won&rsquo;t be placed on the timeline.
+          </p>
+        )}
         {!overPromptLimit &&
           overLength.length === 0 &&
           unknownTags.length === 0 &&
-          overRefLimit === 0 && (
+          overRefLimit === 0 &&
+          issues.empty.length === 0 &&
+          issues.duplicates.length === 0 && (
             <p className="text-muted">
-              Tagged characters are attached to that prompt; pinned ones are
-              attached to every prompt.
+              {tagged.length > 0 ? (
+                <>
+                  Each <span className="font-mono text-emerald-400">#cue</span>{" "}
+                  names its image on download —{" "}
+                  <span className="font-mono">#{tagged[0].tag}</span> saves as{" "}
+                  <span className="font-mono">{tagged[0].tag}.png</span>, which
+                  the video editor reads as its timestamp. Lines under a cue
+                  belong to that prompt.
+                </>
+              ) : (
+                <>
+                  Tagged characters are attached to that prompt; pinned ones are
+                  attached to every prompt. Start a line with{" "}
+                  <span className="font-mono text-emerald-400">#0-00</span> to
+                  name that prompt&rsquo;s image for the video editor.
+                </>
+              )}
             </p>
           )}
       </div>

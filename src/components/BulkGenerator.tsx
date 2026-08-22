@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import type { ZipProgress } from "@/lib/download";
 import { KIE_MODELS } from "@/lib/kieModels";
@@ -97,6 +98,13 @@ export function BulkGenerator() {
             </button>
           ))}
         </div>
+
+        {/* Its own route rather than a third tab: the editor holds an audio
+            track and a hundred decoded images, and unmounting all of that
+            every time someone glances at the queue would be its own bug. */}
+        <Link href="/editor" className="pill">
+          Video editor →
+        </Link>
       </header>
 
       {mode === "videos" ? (

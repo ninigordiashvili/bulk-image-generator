@@ -1,10 +1,13 @@
 "use client";
 
 import Image from "next/image";
-import { VIDEO_MODELS, videoModel } from "@/lib/videoModels";
+import { useState } from "react";
+import { VIDEO_MODELS, isAudioDriven, videoModel } from "@/lib/videoModels";
+import { formatTime } from "@/lib/editor/format";
 import { creditsPerImage, formatCredits } from "@/lib/pricing";
-import { useVideoStore } from "@/store/videoStore";
+import { shotSize, useVideoStore } from "@/store/videoStore";
 import type { GenerationJob, VideoShot } from "@/types";
+import { AudioTrimmer } from "./AudioTrimmer";
 
 const STATUS_META: Record<string, { icon: string; className: string }> = {
   queued: { icon: "○", className: "text-muted" },
@@ -30,14 +33,16 @@ export function VideoShotRow({
   const removeShot = useVideoStore((state) => state.removeShot);
   const retryJob = useVideoStore((state) => state.retryJob);
   const creditRates = useVideoStore((state) => state.creditRates);
+  const audioSources = useVideoStore((state) => state.audioSources);
+  const setShotAudio = useVideoStore((state) => state.setShotAudio);
+
+  const [trimming, setTrimming] = useState(false);
 
   const spec = videoModel(shot.model);
+  const audioDriven = isAudioDriven(spec);
+  const source = audioSources.find((entry) => entry.id === shot.audio?.sourceId);
   const status = job ? STATUS_META[job.status] : undefined;
-  const rate = creditsPerImage(
-    shot.model,
-    { duration: shot.duration, resolution: shot.resolution },
-    creditRates
-  );
+  const rate = creditsPerImage(shot.model, shotSize(shot), creditRates);
 
   return (
     <li className="flex gap-3 rounded-lg border border-line bg-surface-2 p-3">
@@ -56,7 +61,11 @@ export function VideoShotRow({
         <div className="flex items-start gap-2">
           <textarea
             className="field h-16 flex-1 resize-y text-xs"
-            placeholder={`Describe the motion for ${shot.image.name} — what moves, and how the camera behaves.`}
+            placeholder={
+              audioDriven
+                ? `Optional direction for ${shot.image.name} — the voice track drives the performance.`
+                : `Describe the motion for ${shot.image.name} — what moves, and how the camera behaves.`
+            }
             value={shot.prompt}
             disabled={disabled}
             onChange={(event) =>
@@ -91,6 +100,68 @@ export function VideoShotRow({
             </select>
           </label>
 
+          {/* An avatar row has no size options at all: the model takes an
+              image, a voice track and a prompt, and the audio sets the length.
+              So the row shows the cut instead. */}
+          {audioDriven ? (
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-muted">Voice</span>
+              {shot.audio && source ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => setTrimming(true)}
+                    className="pill px-2 py-0.5 text-[11px] pill-active font-mono"
+                    title="Change the cut"
+                  >
+                    {source.name} · {formatTime(shot.audio.start, true)} +
+                    {shot.audio.duration.toFixed(1)}s
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => setShotAudio(shot.id, undefined)}
+                    className="text-[11px] text-muted hover:text-red-400 disabled:opacity-40"
+                    title="Remove the voice track"
+                  >
+                    ✕
+                  </button>
+                </>
+              ) : audioSources.length === 0 ? (
+                <span className="text-amber-400">
+                  load a voice track above first
+                </span>
+              ) : (
+                <select
+                  className="field w-auto px-2 py-1 text-xs"
+                  value=""
+                  disabled={disabled}
+                  onChange={(event) => {
+                    const picked = audioSources.find((e) => e.id === event.target.value);
+                    if (!picked) return;
+                    setShotAudio(shot.id, {
+                      sourceId: picked.id,
+                      name: picked.name,
+                      start: 0,
+                      duration: Math.min(15, picked.duration),
+                    });
+                    setTrimming(true);
+                  }}
+                >
+                  <option value="" disabled>
+                    Pick a track…
+                  </option>
+                  {audioSources.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {entry.fileName}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          ) : (
+          <>
           {/* Duration and resolution are per row, and their allowed values come
               from the row's own model — Veo tops out at 8s, Grok at 30s. */}
           <label className="flex items-center gap-1.5 text-[11px] text-muted">
@@ -147,6 +218,8 @@ export function VideoShotRow({
               ))}
             </select>
           </label>
+          </>
+          )}
 
           {rate !== null && (
             <span className="text-[11px] text-muted">≈ {formatCredits(rate)}</span>
@@ -178,6 +251,25 @@ export function VideoShotRow({
           </div>
         )}
       </div>
+
+      {trimming && source && shot.audio && (
+        <AudioTrimmer
+          source={source}
+          start={shot.audio.start}
+          duration={shot.audio.duration}
+          maxSeconds={spec.maxAudioSeconds ?? 300}
+          onCancel={() => setTrimming(false)}
+          onConfirm={(start, length) => {
+            setShotAudio(shot.id, {
+              sourceId: source.id,
+              name: source.name,
+              start,
+              duration: length,
+            });
+            setTrimming(false);
+          }}
+        />
+      )}
     </li>
   );
 }

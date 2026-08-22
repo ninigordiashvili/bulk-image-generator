@@ -1,23 +1,27 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { uniqueName } from "@/lib/download";
 import { formatCredits, formatSpend } from "@/lib/pricing";
 import { useVideoStore } from "@/store/videoStore";
 import type { GeneratedVideo } from "@/types";
 
 /**
- * The `index` is the clip's position in the gallery, which is request order —
- * so the numbers run down the shot list rather than recording who finished
- * first. Matches the numbering the image ZIP uses.
+ * A clip with a cue tag is named for it and nothing else, so the file can go
+ * straight back into the video editor. Otherwise the `index` is the clip's
+ * position in the gallery, which is request order — so the numbers run down the
+ * shot list rather than recording who finished first, matching the image ZIP.
  */
 function fileNameFor(video: GeneratedVideo, index?: number): string {
+  const extension = video.mimeType.includes("webm") ? "webm" : "mp4";
+  if (video.tag) return `${video.tag}.${extension}`;
+
   const slug =
     video.prompt
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "")
       .slice(0, 48) || "video";
-  const extension = video.mimeType.includes("webm") ? "webm" : "mp4";
   const prefix = index === undefined ? "" : `${String(index + 1).padStart(3, "0")}-`;
   return `${prefix}${slug}-${video.duration}s-${video.resolution}.${extension}`;
 }
@@ -113,11 +117,14 @@ export function VideoGallery() {
     try {
       // Sequential, with a beat between each: ten simultaneous downloads trips
       // Chrome's multiple-download block and most of them are silently dropped.
+      const used = new Set<string>();
       for (const [index, video] of videos.entries()) {
         const url = URL.createObjectURL(video.blob);
+        const name = uniqueName(fileNameFor(video, index), used);
+        used.add(name);
         const link = document.createElement("a");
         link.href = url;
-        link.download = fileNameFor(video, index);
+        link.download = name;
         document.body.appendChild(link);
         link.click();
         link.remove();

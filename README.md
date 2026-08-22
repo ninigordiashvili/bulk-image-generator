@@ -5,6 +5,10 @@ image models plus Veo 3.1 Lite and Grok Image-to-Video, with multi-account key
 support, a character-reference library, a style bible for cross-batch
 consistency, and a credit estimate learned from what kie actually bills.
 
+Plus a **video editor** (`/editor`) that cuts a generated batch to a voiceover:
+name each image for the second it should appear at, drop in the audio, and it
+renders a 1080p MP4 with ffmpeg.
+
 Everything runs locally: your own Next.js server plus the browser. No database, no
 cloud storage. Images live in memory and in the browser's IndexedDB; nothing leaves
 the machine except the calls to kie.ai.
@@ -172,6 +176,168 @@ through `/api/kie/video/file`, a proxy that exists because kie's CDN sends no
 CORS headers; it allowlists kie's media hosts so it can't be used as an open
 proxy.
 
+## Talking avatars
+
+Two more video models, both on kie's ordinary `jobs/createTask` alongside Grok:
+`kling/ai-avatar-standard` and `kling/ai-avatar-pro`. They take a portrait, a
+voice track and a prompt, and lip-sync the face to the voice.
+
+They are **audio-driven**, which makes them a different shape from everything
+else here: the audio *is* the clip. There's no duration to pick — the cut sets
+the length — and no resolution or aspect ratio, so an avatar row hides those
+controls and shows the cut instead. The prompt becomes optional (kie requires
+the field, not its content); the voice track is the thing that can't be missing,
+and `isRunnable` flips accordingly.
+
+**One recording, many cuts.** Voice tracks are loaded once into a shelf above
+the storyboard, not per row, because a two-minute narration usually feeds a
+dozen rows that each want a different ten seconds of it. "→ all rows" hands
+every row the same track and leaves each one its own cut.
+
+The **trimmer** is a modal with a 200px waveform, a ruler whose step adapts to
+the zoom (per-second when you're close, per-minute when you're not), draggable
+edges, scroll-to-zoom about the cursor, a pan bar, looped playback of just the
+selection, and 5/10/15/20/30s presets. It shows the resulting filename live.
+
+**The cut happens on the server**, in ffmpeg, not in the browser. A stream copy
+can only cut on a frame boundary — the clip would start up to a frame early and
+the lip-sync would inherit that error — so it re-encodes: `-ss`/`-t` into mono
+44.1kHz AAC. Fifteen seconds lands around 240 KB, which matters when every row
+uploads one. Measured accurate to a fortieth of a second, and verified to come
+from the right place in the track.
+
+**Uploads are content-addressed.** The browser hashes the file and the server
+stores it under that hash, so attaching the same recording to twenty rows
+uploads it once and re-attaching it tomorrow uploads it not at all. There's no
+registry to keep in sync — the id *is* the filename. Tracks are swept after a
+day.
+
+**Naming: track plus cut point.** A cut taken at 1:35 of `narration.mp3` saves
+as `narration_1-35.mp4`. The suffix is in the same cue form the rest of the app
+reads, so those clips also drop straight onto the video editor's timeline at
+that moment. An explicit `#cue` in the row's prompt still wins.
+
+Everything else is inherited: the same account and credit balance, the queue
+with its concurrency and retries, resume-don't-repay on `taskId`, the gallery.
+Because an avatar row has no duration field, `shotSize()` reports the cut's
+length instead — otherwise every talking clip would be labelled with a stale
+number and the learned credit rates would be keyed on a lie.
+
+## Naming output with `#cues`
+
+A prompt can name the file it produces. Start a line with `#` and the rest of
+that line becomes the filename:
+
+```
+#0-00
+Wolves howling on a dark ridge above an empty valley at night, raw phone photo
+look, natural lighting, no color grading, realistic and unedited
+
+#0-05
+Small canvas wall tent pitched on a grassy bench above a creek, yellow
+cottonwoods, early October, raw phone photo look, natural lighting, realistic
+and unedited
+```
+
+That saves `0-00.png` and `0-05.png` — no index prefix, no slug of the prompt
+text. Which is the whole point: those names are exactly what the video editor
+reads back as timestamps, so a batch comes out of the generator already an edit.
+Generate, download the ZIP, drop the folder on `/editor`, done.
+
+**A cue switches the box to blocks.** Normally one non-blank line is one prompt.
+As soon as any `#cue` appears, every line under a cue belongs to that prompt
+until the next cue — which is the only way to write a prompt that spans lines,
+and it makes a 400-character shot description readable. Text above the first cue
+still reads one-per-line. A box with no cues behaves exactly as it always did.
+
+**The cue never reaches the model.** It's a filename, not part of the prompt.
+`@N` character tags are unaffected and still work inside a cue block.
+
+**Clips inherit cues too.** A `#cue` in a video row's prompt names the clip. So
+does the source still, if the still is itself named for a timestamp — animate
+`0-00.png` and you get `0-00.mp4`. A still with an ordinary name is left alone.
+Talking-avatar rows take their name from the voice track and the cut point
+instead: see [Talking avatars](#talking-avatars).
+
+The tag is scrubbed to `A-Za-z0-9._-` before it touches the filesystem, so a cue
+can't write outside the download. Two prompts sharing a cue is flagged in the
+input panel; the second file is saved as `0-00 (2).png`, deliberately a form the
+editor's parser rejects, so the duplicate lands in the folder unplaced rather
+than silently stealing the slot.
+
+## Video editor
+
+`/editor` turns a folder of stills and an audio track into an MP4. It's built for
+the output of the Images tab: generate a hundred frames for a narration, name
+each one for its cue, and the edit assembles itself.
+
+**The filename is the edit.** An image called `0-08.png` appears at 0:08 and
+holds until the next image's cue; the last one holds until the audio ends. There
+is no other timeline data — no project file, no manual dragging. `mm-ss` is the
+main form (colons aren't legal in filenames on Windows); `h-mm-ss`, `mm_ss`,
+bare `mmss`, decimals like `0-08.5`, and a cue on the end of a longer name
+(`shot-03_1-12`) all parse too. Anything unreadable is listed rather than
+silently dropped, and the Cues panel shows what every name resolved to.
+
+**Subtle motion, without the shake.** Each image can drift 2–20% larger (or
+smaller, or alternating) across its slot.
+
+The obvious filter for this is `zoompan`, and it is the wrong one: it truncates
+its crop origin to a whole source pixel. A gentle zoom moves that origin by well
+under a pixel per frame, so the picture holds still for two or three frames and
+then snaps. Measured on an 8s clip at 8%, **70% of frames didn’t move at all** —
+which the eye reads as shake, not drift. Supersampling the source only shrinks
+the steps; it never removes them (3× still left 54% of frames frozen), and the
+extra up-then-down resample costs real sharpness.
+
+So the zoom is a per-frame `perspective` transform instead, whose corners are
+floats resolved to a 256th of a pixel. Same measurement: **0% frozen frames**,
+and it keeps nearly twice as much fine detail, because it resamples once at 1:1
+rather than scaling up and back down.
+
+**Cuts land on the exact frame.** Every boundary is `round(t × fps)` computed
+from the absolute cue, not accumulated clip by clip — sizing each clip from its
+own duration would drift several frames off the narration by the hundredth
+image.
+
+**How the render works.** Each clip is encoded on its own to an MPEG-TS segment,
+a few at a time across the cores; the final pass concatenates them by *copying*
+the streams and muxes the audio in, so ten minutes of video is only ever encoded
+once. Every segment uses identical codec settings, which is what makes the copy
+safe. Measured on a 10-core M-series: **10 minutes of 1080p30 with zoom, from
+100 images, in about two minutes** — five times faster than realtime. Worker
+count is flat between 4 and 9 on that machine; the zoom filter, not the
+scheduler, is the limit.
+
+ffmpeg is not a system dependency — `ffmpeg-static` and `ffprobe-static` ship the
+binaries, and `serverExternalPackages` in `next.config.ts` keeps them out of the
+bundle so their paths still resolve.
+
+**Uploads are chunked into 4 MB pieces.** `src/proxy.ts` matches every route, and
+Next buffers a proxied request body in memory up to 10 MB — past that it
+*truncates silently and serves the request anyway*. A ten-minute WAV sent whole
+would arrive as a fragment with no error. Chunking stays well under the limit and
+gives the progress bar real bytes to report.
+
+Uploads, intermediates and the finished file live in a job directory under the OS
+temp dir, swept after six hours. Nothing is written into the repo, and the editor
+holds no state the generator can see.
+
+| Control | Default | Notes |
+| --- | --- | --- |
+| Resolution | 1080p | 16:9 throughout; 720p/1440p/4K also offered |
+| Frame rate | 30 fps | 24 / 25 / 30 / 60 |
+| Zoom | in, 8% | none / in / out / alternate, 2–20% |
+| Encoder | x264 | see below |
+| Before the first image | hold it | only shown when the first cue isn't 0:00 |
+| Audio fade out | 1.5s | trailing fade on the bed |
+
+**x264 beats the hardware encoder here**, which is the opposite of the usual
+advice: clips encode several at a time, so x264 already uses every core, while
+VideoToolbox serialises on one engine. Measured at 1080p30 it was ~20% slower
+than x264 *and* produced a larger file. It's kept as an option for machines with
+few cores, or when you want the CPU back while a render runs.
+
 ## Cost
 
 kie.ai bills in credits, and its docs don't publish a per-model rate — the
@@ -209,3 +375,21 @@ $0.04). Credits are the real unit — check <https://kie.ai> for billed truth.
 - **Resolution mismatch flagging** only applies to models with a `resolution` field
   naming a tier. Models that express size as `quality` or `image_size` have no tier
   to compare the returned pixels against.
+- **The editor re-uploads on every export.** Images go to the server as part of
+  starting a render, so changing one setting and exporting again sends them all a
+  second time. Over localhost that's seconds; over the LAN it isn't.
+- **The editor's timeline lives in the tab.** Settings persist to `localStorage`,
+  but the files themselves can't — reloading means picking the folder again.
+- **Cuts are hard cuts.** No cross-fades between images, and no per-image zoom
+  overrides; the motion setting applies to the whole edit.
+- **Avatar pricing is unverified.** The Kling avatar models are wired from
+  kie's published schema but have not been run here, so their credit cost is
+  unknown until the first clip comes back and `creditsConsumed` teaches the rate
+  table. Budget the first batch small.
+- **The editor still can't take video.** Avatar clips download cue-named and
+  ready, but `/editor` accepts stills only, so assembling them into a timeline
+  is still a manual job.
+- **`imagesPerPrompt` above 1 fights with cues.** Only one file can hold a given
+  name, so the extra variants are saved as `0-00 (2).png` and are not placed on
+  the timeline — pick the one you want and rename it. Cues are designed for the
+  one-image-per-prompt case.

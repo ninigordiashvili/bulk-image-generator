@@ -3,6 +3,59 @@ import type { CharacterRef, PromptItem } from "@/types";
 /** Matches `@1`, `@12` — a character reference tag. */
 export const CHARACTER_TAG_RE = /@(\d+)/g;
 
+/**
+ * A line that is nothing but `#something` names the file its image will be
+ * saved as. It exists so a batch can come out of here already named for the
+ * timestamps the video editor reads — `#0-00` produces `0-00.png`, which drops
+ * straight onto the timeline at 0:00.
+ */
+export const CUE_LINE_RE = /^#[ \t]*(\S+)[ \t]*$/;
+
+/** Everything else is replaced: this ends up as a filename on three platforms. */
+const UNSAFE_TAG_CHARS = /[^A-Za-z0-9._-]+/g;
+
+/** Normalises a raw tag into something safe to write to disk, or null. */
+export function sanitizeCueTag(raw: string): string | null {
+  const cleaned = raw
+    .trim()
+    .replace(UNSAFE_TAG_CHARS, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 60);
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+/** The tag if this line is a cue line, else null. */
+export function cueTagOf(line: string): string | null {
+  const match = line.trim().match(CUE_LINE_RE);
+  return match ? sanitizeCueTag(match[1]) : null;
+}
+
+/** True for a line that opens a block, tag readable or not. */
+export function isCueLine(line: string): boolean {
+  return CUE_LINE_RE.test(line.trim());
+}
+
+/**
+ * The first cue tag in a free-text prompt. Used by the video storyboard, where
+ * a prompt is one textarea per row rather than a list.
+ */
+export function cueTagIn(text: string): string | null {
+  for (const line of text.split("\n")) {
+    const tag = cueTagOf(line);
+    if (tag) return tag;
+  }
+  return null;
+}
+
+/** The prompt without its cue lines — a filename is not part of the prompt. */
+export function stripCueLines(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !isCueLine(line))
+    .join("\n")
+    .trim();
+}
+
 export function extractCharacterIds(line: string): number[] {
   const ids = new Set<number>();
   for (const match of line.matchAll(CHARACTER_TAG_RE)) {
@@ -11,20 +64,105 @@ export function extractCharacterIds(line: string): number[] {
   return [...ids].sort((a, b) => a - b);
 }
 
+interface PromptBlock {
+  raw: string;
+  tag: string | null;
+}
+
 /**
- * One non-blank line = one prompt. Tags are left in the displayed text; only the
- * referenced ids are lifted out.
+ * Splits the box into prompts, in one of two modes.
+ *
+ * Without any `#tag` lines it's one prompt per non-blank line, which is how
+ * this has always worked. The moment a cue line appears the whole box switches
+ * to blocks: `#0-00` opens a prompt and every line under it belongs to that
+ * prompt until the next cue. That's the only way a prompt can span lines, and
+ * it's what makes a 500-character shot description readable in the box.
+ *
+ * `@N` tags stay in the text; only the ids are lifted out. Cue lines do not —
+ * a filename has no business being sent to the model.
  */
 export function parsePrompts(text: string): PromptItem[] {
-  return text
-    .split("\n")
+  const lines = text.split("\n");
+  const blocks = lines.some(isCueLine) ? taggedBlocks(lines) : onePerLine(lines);
+  return blocks.map((block, index) => ({
+    id: `p${index}-${hashLine(block.raw)}`,
+    raw: block.raw,
+    tag: block.tag,
+    referencedCharacterIds: extractCharacterIds(block.raw),
+  }));
+}
+
+function onePerLine(lines: string[]): PromptBlock[] {
+  return lines
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .map((raw, index) => ({
-      id: `p${index}-${hashLine(raw)}`,
-      raw,
-      referencedCharacterIds: extractCharacterIds(raw),
-    }));
+    .map((raw) => ({ raw, tag: null }));
+}
+
+function taggedBlocks(lines: string[]): PromptBlock[] {
+  const blocks: PromptBlock[] = [];
+  let open: PromptBlock | null = null;
+
+  const flush = () => {
+    // A cue with nothing under it isn't a prompt; the input panel calls it out
+    // rather than letting it quietly become one fewer image than expected.
+    if (open && open.raw.length > 0) blocks.push(open);
+    open = null;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (isCueLine(trimmed)) {
+      flush();
+      open = { raw: "", tag: cueTagOf(trimmed) };
+      continue;
+    }
+    if (trimmed.length === 0) continue;
+    if (open) open.raw = open.raw ? `${open.raw}\n${trimmed}` : trimmed;
+    // Text above the first cue keeps the one-per-line reading, so a stray
+    // untagged prompt at the top still runs.
+    else blocks.push({ raw: trimmed, tag: null });
+  }
+  flush();
+
+  return blocks;
+}
+
+/** Cue mistakes worth surfacing before a batch spends anything. */
+export function cueIssues(text: string): { empty: string[]; duplicates: string[] } {
+  const lines = text.split("\n");
+  if (!lines.some(isCueLine)) return { empty: [], duplicates: [] };
+
+  const empty: string[] = [];
+  let openTag: string | null = null;
+  let openHasText = false;
+
+  const close = () => {
+    if (openTag !== null && !openHasText) empty.push(openTag);
+    openTag = null;
+    openHasText = false;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (isCueLine(trimmed)) {
+      close();
+      openTag = cueTagOf(trimmed) ?? trimmed;
+      continue;
+    }
+    if (trimmed.length > 0) openHasText = true;
+  }
+  close();
+
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const prompt of parsePrompts(text)) {
+    if (!prompt.tag) continue;
+    if (seen.has(prompt.tag)) duplicates.add(prompt.tag);
+    seen.add(prompt.tag);
+  }
+
+  return { empty, duplicates: [...duplicates] };
 }
 
 /**

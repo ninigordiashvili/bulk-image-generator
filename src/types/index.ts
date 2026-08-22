@@ -124,6 +124,8 @@ export interface GeneratedImage extends GalleryOrderKeys {
   /** The queue job that produced it — lets the progress panel total actual spend. */
   jobId: string;
   prompt: string;
+  /** Filename stem from the prompt's `#cue` line, when it had one. */
+  tag?: string;
   base64: string;
   mimeType: string;
   /** kie.ai model id that produced it. */
@@ -149,8 +151,13 @@ export interface GeneratedImage extends GalleryOrderKeys {
 
 export interface PromptItem {
   id: string;
-  /** Raw line as typed, `@N` tags left intact. */
+  /** Prompt text as typed, `@N` tags left intact and `#cue` lines removed. */
   raw: string;
+  /**
+   * Filename this prompt's output is saved as, from a `#0-00` line above it.
+   * Null when the prompt carries no cue, which falls back to a slug of the text.
+   */
+  tag: string | null;
   referencedCharacterIds: number[];
 }
 
@@ -170,6 +177,8 @@ export interface GenerationJob {
   promptIndex: number;
   /** 0-based index within this prompt's imagesPerPrompt copies. */
   copyIndex: number;
+  /** The prompt's `#cue` tag, carried through so the result can be named by it. */
+  tag: string | null;
   referencedCharacterIds: number[];
   status: JobStatus;
   attempts: number;
@@ -251,6 +260,22 @@ export interface ShotImage {
 }
 
 /**
+ * The slice of a voice track a talking-avatar row lip-syncs to. The cut itself
+ * lives on the server; a row only holds where to take it from, so twenty rows
+ * sharing one recording cost one upload.
+ */
+export interface ShotAudio {
+  /** Content hash of the uploaded source. */
+  sourceId: string;
+  /** Original filename without its extension — half of the output's name. */
+  name: string;
+  /** Where the cut starts within the whole recording, in seconds. */
+  start: number;
+  /** Length of the cut, in seconds. */
+  duration: number;
+}
+
+/**
  * One row of the video storyboard: an image, its own prompt, and its own model
  * and output settings. Rows are independent — a batch can mix Veo and Grok, and
  * mix durations and resolutions, because each row is a separate kie task.
@@ -259,6 +284,8 @@ export interface VideoShot {
   id: string;
   image: ShotImage;
   prompt: string;
+  /** Required by audio-driven models, ignored by the others. */
+  audio?: ShotAudio;
   model: string;
   duration: number;
   resolution: string;
@@ -274,6 +301,8 @@ export interface GeneratedVideo extends GalleryOrderKeys {
   id: string;
   shotId: string;
   prompt: string;
+  /** Filename stem, from a `#cue` in the prompt or a cue-named source still. */
+  tag?: string;
   model: string;
   modelLabel: string;
   mimeType: string;
@@ -304,6 +333,22 @@ export interface VideoStartRequest {
   duration: number;
   resolution: string;
   aspectRatio: string;
+  /** Set for audio-driven models: the server cuts and uploads this itself. */
+  audio?: { sourceId: string; start: number; duration: number };
+}
+
+export interface AudioUploadResponse {
+  ok: true;
+  id: string;
+  bytes: number;
+  /** True once the whole file is on disk — `duration` is only set then. */
+  complete: boolean;
+  duration: number;
+}
+
+export interface ErrorResponse {
+  ok: false;
+  error: string;
 }
 
 /**
