@@ -9,7 +9,7 @@ import {
   type KieFieldSpec,
 } from "@/lib/kieModels";
 import { useGenerationStore } from "@/store/generationStore";
-import { CUSTOM_MODEL, type InputValue } from "@/types";
+import { CUSTOM_MODEL, MAX_CONCURRENCY, type InputValue } from "@/types";
 
 function NumberField({
   label,
@@ -274,7 +274,7 @@ export function GenerationSettingsPanel({ disabled }: { disabled: boolean }) {
           label="Concurrency"
           value={queueConfig.concurrency}
           min={1}
-          max={10}
+          max={MAX_CONCURRENCY}
           disabled={false}
           onChange={(concurrency) => setQueueConfig({ concurrency })}
         />

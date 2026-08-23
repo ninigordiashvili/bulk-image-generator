@@ -26,7 +26,11 @@ interface Preset {
   grainPasses: number;
   tileScale: number;
   vignette: number;
-  flicker: number;
+  flicker: {
+    a1: number; p1: number;
+    a2: number; p2: number;
+    pulse: number; every: number; width: number;
+  };
   saturate: number;
   contrast: number;
 }
@@ -38,9 +42,12 @@ interface Preset {
  * the export misleads exactly as much as one with no grain at all.
  */
 const PRESETS: Record<Exclude<FilmLook, "off">, Preset> = {
-  subtle: { grainAlpha: 0.045, grainPasses: 1, tileScale: 1, vignette: 0.28, flicker: 0.012, saturate: 0.9, contrast: 1.03 },
-  medium: { grainAlpha: 0.11, grainPasses: 1, tileScale: 1, vignette: 0.42, flicker: 0.022, saturate: 0.76, contrast: 1.08 },
-  heavy: { grainAlpha: 0.2, grainPasses: 2, tileScale: 1.5, vignette: 0.56, flicker: 0.038, saturate: 0.55, contrast: 1.14 },
+  subtle: { grainAlpha: 0.045, grainPasses: 1, tileScale: 1, vignette: 0.28, saturate: 0.9, contrast: 1.03,
+    flicker: { a1: 0.004, p1: 12.7, a2: 0.003, p2: 7.3, pulse: 0.016, every: 9.1, width: 0.13 } },
+  medium: { grainAlpha: 0.11, grainPasses: 1, tileScale: 1, vignette: 0.42, saturate: 0.76, contrast: 1.08,
+    flicker: { a1: 0.006, p1: 11.3, a2: 0.004, p2: 6.7, pulse: 0.026, every: 7.3, width: 0.13 } },
+  heavy: { grainAlpha: 0.2, grainPasses: 2, tileScale: 1.5, vignette: 0.56, saturate: 0.55, contrast: 1.14,
+    flicker: { a1: 0.007, p1: 10.1, a2: 0.004, p2: 6.1, pulse: 0.040, every: 5.9, width: 0.14 } },
 };
 
 const TILE = 256;
@@ -109,10 +116,17 @@ export function applyLook(
   }
   const preset = PRESETS[look];
 
-  // Flicker, from two oscillators out of phase so it never settles into a
-  // rhythm the eye can predict.
+  // Flicker: a slow exposure drift with an occasional pulse riding on top.
+  // This used to be two fast oscillators and it strobed — see the note on
+  // filmChain in server/editor/render.ts, which this mirrors exactly so the
+  // preview and the export show the same thing.
+  const f = preset.flicker;
+  const sincePulse = ((time % f.every) + f.every) % f.every;
   const flicker =
-    1 + preset.flicker * Math.sin(time * 13.1) + preset.flicker * 0.6 * Math.sin(time * 29.7);
+    1 +
+    f.a1 * Math.sin((2 * Math.PI * time) / f.p1) +
+    f.a2 * Math.sin((2 * Math.PI * time) / f.p2) +
+    f.pulse * Math.exp(-(((sincePulse - f.every / 2) / f.width) ** 2));
 
   // No gate weave. A projector really does drift a pixel or two, but over a
   // slideshow it reads as camera shake rather than as film.

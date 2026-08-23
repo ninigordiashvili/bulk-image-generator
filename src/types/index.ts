@@ -373,4 +373,14 @@ export type VideoStatusResponse =
     }
   | { ok: false; error: string; retryable?: boolean };
 
-export const MAX_SHOTS = 25;
+export const MAX_SHOTS = 100;
+
+/**
+ * How many generations may be in flight at once.
+ *
+ * This was 10. It is a throughput knob, not a safety one — kie queues the work
+ * either way — so the ceiling only needs to be somewhere sane. Raising it makes
+ * a big batch finish sooner; if kie starts rate-limiting, the queue's retries
+ * absorb it. Cost is unchanged: the same clips are billed either way.
+ */
+export const MAX_CONCURRENCY = 25;

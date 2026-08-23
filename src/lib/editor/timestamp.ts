@@ -66,3 +66,34 @@ export function secondsToCue(seconds: number): string {
   const whole = Math.max(0, Math.round(seconds));
   return `${Math.floor(whole / 60)}-${String(whole % 60).padStart(2, "0")}`;
 }
+
+/**
+ * Parses what someone types into a time box: `3:14`, `1:03:14`, `3:14.5`, or a
+ * plain number of seconds.
+ *
+ * A bare number stays seconds on purpose. `parseTimestamp` above reads `194` as
+ * mmss because that is what a *filename* means, but this box has always taken
+ * seconds, and silently turning a typed 194 into 1:34 would move a cut the user
+ * had already lined up. So the separator is what asks for clock time, and
+ * without one nothing changes.
+ */
+export function parseClock(text: string): number | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  if (/[:\-_]/.test(trimmed)) {
+    const parts = trimmed.split(/[:\-_]/);
+    if (parts.length > 3) return null;
+    if (parts.some((part) => !/^\d+(?:[.,]\d+)?$/.test(part))) return null;
+    // Rightmost unit is seconds, then minutes, then hours.
+    const seconds = parts
+      .map((part) => num(part))
+      .reverse()
+      .reduce((sum, value, index) => sum + value * 60 ** index, 0);
+    return Number.isFinite(seconds) ? seconds : null;
+  }
+
+  if (!/^\d+(?:[.,]\d+)?$/.test(trimmed)) return null;
+  const value = num(trimmed);
+  return Number.isFinite(value) ? value : null;
+}

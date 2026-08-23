@@ -59,6 +59,16 @@ export function ImageCard({ image }: { image: GeneratedImage }) {
           <Image src={src} alt={image.prompt} fill unoptimized className="object-cover" />
         </div>
 
+        {/* The filename, before you download rather than after. With #cue
+            naming the name *is* the timestamp the shot belongs at, so being
+            able to read it off the card is how you check a batch lined up. */}
+        <p
+          className="truncate border-t border-line px-2 py-1 font-mono text-[11px] text-foreground/80"
+          title={fileNameFor(image)}
+        >
+          {fileNameFor(image)}
+        </p>
+
         <div className="pointer-events-none absolute top-1.5 left-1.5 flex flex-wrap gap-1">
           {image.referencedCharacterIds.length > 0 && (
             <span className="badge">
@@ -83,7 +93,7 @@ export function ImageCard({ image }: { image: GeneratedImage }) {
             so a fade-in bar was revealed and hidden in the same motion. Entering
             the bar dismisses any open preview so the buttons stay clickable. */}
         <div
-          className="absolute inset-x-0 bottom-0 flex items-center gap-1 bg-gradient-to-t from-black/85 to-transparent p-1.5"
+          className="absolute inset-x-0 bottom-7 flex items-center gap-1 bg-gradient-to-t from-black/85 to-transparent p-1.5"
           onMouseEnter={() => setPreview(null)}
         >
           <button

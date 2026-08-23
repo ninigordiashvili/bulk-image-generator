@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AudioSource } from "@/store/videoStore";
 import { formatTime } from "@/lib/editor/format";
+import { parseClock } from "@/lib/editor/timestamp";
 import { secondsToCue } from "@/lib/editor/timestamp";
 
 /** Grab zone for the selection edges, in pixels either side. */
@@ -54,6 +55,8 @@ export function AudioTrimmer({
 
   // The visible window, independent of the selection.
   const [viewStart, setViewStart] = useState(0);
+  /** What's being typed into the Start box, or null when it isn't being typed in. */
+  const [startDraft, setStartDraft] = useState<string | null>(null);
   const [viewSpan, setViewSpan] = useState(total);
 
   const [playing, setPlaying] = useState(false);
@@ -273,11 +276,36 @@ export function AudioTrimmer({
     setViewSpan(next.span);
   };
 
-  const fitSelection = () => {
-    const pad = Math.max(0.5, selLength * 0.25);
-    const next = clampView(selStart - pad, selLength + pad * 2);
-    setViewStart(next.start);
-    setViewSpan(next.span);
+  /** Zooms the view onto one selection, with a little air either side. */
+  const fitTo = useCallback(
+    (start: number, length: number) => {
+      const pad = Math.max(0.5, length * 0.25);
+      const next = clampView(start - pad, length + pad * 2);
+      setViewStart(next.start);
+      setViewSpan(next.span);
+    },
+    [clampView]
+  );
+
+  const fitSelection = () => fitTo(selStart, selLength);
+
+  /**
+   * Committing the Start box: jump there and zoom in on it.
+   *
+   * Typing a time is how you get to a place you already know about, and the
+   * next thing you always want is to see it — so this does what pressing "Fit
+   * cut" would, rather than leaving the selection somewhere off-screen in a
+   * seventeen-minute waveform.
+   */
+  const commitStart = () => {
+    const typed = startDraft;
+    setStartDraft(null);
+    if (typed === null) return;
+    const parsed = parseClock(typed);
+    if (parsed === null) return;
+    const next = clamp(parsed, 0, Math.max(0, total - selLength));
+    setSelStart(next);
+    fitTo(next, selLength);
   };
 
   // ---- playback of the selection ----
@@ -353,7 +381,8 @@ export function AudioTrimmer({
               {source.fileName}
             </h2>
             <p className="text-xs text-muted">
-              {formatTime(total, true)} total · drag to select, scroll to zoom
+              {formatTime(total, true)} total · drag to select, scroll to zoom · type a time
+              like 3:14 in Start to jump there
             </p>
           </div>
           <div className="flex items-center gap-1">
@@ -448,21 +477,29 @@ export function AudioTrimmer({
           <label className="text-xs text-muted">
             Start
             <input
-              type="number"
-              min={0}
-              max={Math.max(0, total - MIN_SECONDS)}
-              step={0.1}
-              value={Number(selStart.toFixed(2))}
-              onChange={(event) => {
-                const next = clamp(
-                  Number(event.target.value) || 0,
-                  0,
-                  Math.max(0, total - selLength)
-                );
-                setSelStart(next);
+              type="text"
+              inputMode="numeric"
+              // Free text rather than a number box: `3:14` is how anyone thinks
+              // about a point in a seventeen-minute recording, and a number box
+              // will not accept the colon. Plain seconds still work.
+              value={startDraft ?? formatTime(selStart, true)}
+              placeholder="3:14"
+              title="Type 3:14 for three minutes fourteen, or 194 for seconds. Enter jumps there and zooms in."
+              onChange={(event) => setStartDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitStart();
+                } else if (event.key === "Escape") {
+                  setStartDraft(null);
+                }
               }}
-              onBlur={revealSelection}
-              className="field mt-0.5 w-24 px-2 py-1 font-mono text-xs"
+              onBlur={commitStart}
+              className={`field mt-0.5 w-24 px-2 py-1 font-mono text-xs ${
+                startDraft !== null && parseClock(startDraft) === null
+                  ? "border-red-500/60"
+                  : ""
+              }`}
             />
           </label>
 

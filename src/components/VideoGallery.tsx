@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { uniqueName } from "@/lib/download";
 import { formatCredits, formatSpend } from "@/lib/pricing";
 import { useVideoStore } from "@/store/videoStore";
@@ -31,6 +32,62 @@ function formatSize(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
+/**
+ * A full-size player over the page.
+ *
+ * The card thumbnail is around 340px wide, and a native control bar squeezed
+ * into that over a poster frame reads as a still image rather than something
+ * you can watch. Checking a clip before committing it to an edit needs to be
+ * possible at a size where you can actually see it.
+ */
+function VideoLightbox({
+  url,
+  name,
+  onClose,
+}: {
+  url: string;
+  name: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    // The page behind must not scroll while this is up.
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = previous;
+    };
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-black/85 p-6"
+      onClick={onClose}
+    >
+      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+      <video
+        src={url}
+        controls
+        autoPlay
+        // Width-driven with a height cap, so a small clip is scaled *up* to
+        // fill the space rather than sitting at its native size in the middle
+        // of a black screen. object-contain keeps the aspect either way.
+        className="h-auto max-h-[82vh] w-full max-w-[min(92vw,1600px)] rounded-lg bg-black object-contain shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      />
+      <p className="font-mono text-xs text-white/70">{name}</p>
+      <button type="button" className="pill" onClick={onClose}>
+        Close (Esc)
+      </button>
+    </div>,
+    document.body
+  );
+}
+
 function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
   const removeVideo = useVideoStore((state) => state.removeVideo);
 
@@ -38,6 +95,9 @@ function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
   // 1080p videos pins every blob in memory for the life of the page.
   const url = useMemo(() => URL.createObjectURL(video.blob), [video.blob]);
   useEffect(() => () => URL.revokeObjectURL(url), [url]);
+
+  const [preview, setPreview] = useState(false);
+  const closePreview = useCallback(() => setPreview(false), []);
 
   function download() {
     const link = document.createElement("a");
@@ -50,14 +110,31 @@ function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
 
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-surface-2">
-      <video
-        src={url}
-        poster={`data:${video.posterMimeType};base64,${video.posterBase64}`}
-        controls
-        preload="metadata"
-        className="w-full bg-black"
-      />
+      <div className="relative">
+        {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+        <video
+          src={url}
+          poster={`data:${video.posterMimeType};base64,${video.posterBase64}`}
+          controls
+          preload="metadata"
+          className="w-full bg-black"
+        />
+        <button
+          type="button"
+          onClick={() => setPreview(true)}
+          title="Watch it full size"
+          className="absolute top-1.5 right-1.5 rounded-md bg-black/70 px-2 py-1 text-[11px] text-white/90 hover:bg-black/90"
+        >
+          ⤢ Preview
+        </button>
+      </div>
       <div className="space-y-1.5 p-2">
+        <p
+          className="truncate font-mono text-[11px] text-foreground/80"
+          title={fileNameFor(video, index)}
+        >
+          {fileNameFor(video, index)}
+        </p>
         <p className="line-clamp-2 text-[11px] text-muted" title={video.prompt}>
           {video.prompt}
         </p>
@@ -82,6 +159,14 @@ function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
           <button
             type="button"
             className="badge cursor-pointer hover:bg-black/80"
+            onClick={() => setPreview(true)}
+            title="Watch it full size"
+          >
+            ▶ Preview
+          </button>
+          <button
+            type="button"
+            className="badge cursor-pointer hover:bg-black/80"
             onClick={download}
             title={`Download ${fileNameFor(video, index)}`}
           >
@@ -96,6 +181,9 @@ function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
           </button>
         </div>
       </div>
+      {preview && (
+        <VideoLightbox url={url} name={fileNameFor(video, index)} onClose={closePreview} />
+      )}
     </div>
   );
 }

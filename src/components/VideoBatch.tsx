@@ -7,7 +7,7 @@ import { creditsPerImage, formatCredits, formatUsd, creditsToUsd } from "@/lib/p
 import { VIDEO_MODELS, isAudioDriven, videoModel } from "@/lib/videoModels";
 import { isRunning, useGenerationStore } from "@/store/generationStore";
 import { isRunnable, shotSize, useVideoStore } from "@/store/videoStore";
-import { MAX_SHOTS } from "@/types";
+import { MAX_CONCURRENCY, MAX_SHOTS } from "@/types";
 import { VideoGallery } from "./VideoGallery";
 import { VideoShotRow } from "./VideoShotRow";
 
@@ -345,11 +345,11 @@ export function VideoBatch() {
               type="number"
               className="field w-16 px-2 py-1 text-xs"
               min={1}
-              max={10}
+              max={MAX_CONCURRENCY}
               value={concurrency}
               onChange={(event) =>
                 setConcurrency(
-                  Math.min(10, Math.max(1, Number(event.target.value) || 1))
+                  Math.min(MAX_CONCURRENCY, Math.max(1, Number(event.target.value) || 1))
                 )
               }
             />

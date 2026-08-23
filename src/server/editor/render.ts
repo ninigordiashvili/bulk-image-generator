@@ -185,8 +185,8 @@ export function codecArgs(settings: RenderSettings): string[] {
  *
  *  - grain that re-randomises every frame (`allf=t`), not a fixed overlay —
  *    static grain reads as a dirty lens, moving grain reads as film;
- *  - flicker, a slight brightness wobble from two out-of-phase oscillators so
- *    it never settles into an obvious rhythm;
+ *  - flicker: a slow exposure drift with an occasional brighter pulse riding on
+ *    top, described below;
  *  - vignette and faded curves, which are just the look sitting still.
  *
  * No gate weave. A real projector drifts a pixel or two and it is authentic,
@@ -196,20 +196,63 @@ export function codecArgs(settings: RenderSettings): string[] {
  * Grain is noise, and noise is what H.264 spends bits on, so a heavy setting
  * will grow the file noticeably. That's the honest cost, not a bug.
  */
+/**
+ * Exposure flicker.
+ *
+ * This was two fast oscillators (2.1Hz and 4.7Hz), and it strobed. `eq` applies
+ * brightness in coarse quanta — a change lands as a jump of about three and a
+ * half grey levels, never something smaller — so a fast wobble doesn't read as
+ * a gentle shimmer, it reads as a stream of little flashes. Measured on a flat
+ * grey field: brightness moved on 44-79% of all frames, up to 24 times a
+ * second, and never held still for more than a fifth of a second.
+ *
+ * So the wobble is slow enough that the quantisation has nothing to bite on,
+ * and the *flash* is now a deliberate, isolated event: a brief pulse every six
+ * to nine seconds, which is what a worn print actually does. Same measurement
+ * on the settings below: brightness moves on 2-6% of frames, and sits perfectly
+ * still for five to eight seconds between pulses.
+ *
+ * The two drift periods are deliberately non-harmonic, so the pattern doesn't
+ * line up with itself and start sounding like a loop.
+ */
+interface Flicker {
+  /** Amplitude and period of the two drift oscillators. */
+  a1: number; p1: number;
+  a2: number; p2: number;
+  /** Height, spacing and width of the pulse. */
+  pulse: number; every: number; width: number;
+}
+
+function flickerExpression(f: Flicker): string {
+  return (
+    `${f.a1}*sin(2*PI*t/${f.p1})+${f.a2}*sin(2*PI*t/${f.p2})` +
+    `+${f.pulse}*exp(-pow((mod(t,${f.every})-${f.every / 2})/${f.width},2))`
+  );
+}
+
 export function filmChain(look: FilmLook): string {
   if (look === "off") return "";
 
   const preset = {
-    subtle: { grain: 6, vignette: "PI/5", flicker: 0.012, sat: 0.9, contrast: 1.03 },
-    medium: { grain: 13, vignette: "PI/4.2", flicker: 0.022, sat: 0.76, contrast: 1.08 },
-    heavy: { grain: 24, vignette: "PI/3.6", flicker: 0.038, sat: 0.55, contrast: 1.14 },
+    subtle: {
+      grain: 6, vignette: "PI/5", sat: 0.9, contrast: 1.03,
+      flicker: { a1: 0.004, p1: 12.7, a2: 0.003, p2: 7.3, pulse: 0.016, every: 9.1, width: 0.13 },
+    },
+    medium: {
+      grain: 13, vignette: "PI/4.2", sat: 0.76, contrast: 1.08,
+      flicker: { a1: 0.006, p1: 11.3, a2: 0.004, p2: 6.7, pulse: 0.026, every: 7.3, width: 0.13 },
+    },
+    heavy: {
+      grain: 24, vignette: "PI/3.6", sat: 0.55, contrast: 1.14,
+      flicker: { a1: 0.007, p1: 10.1, a2: 0.004, p2: 6.1, pulse: 0.040, every: 5.9, width: 0.14 },
+    },
   }[look];
 
   const parts: string[] = [];
 
   parts.push(
     `eq=saturation=${preset.sat}:contrast=${preset.contrast}` +
-      `:brightness='${preset.flicker}*sin(t*13.1)+${preset.flicker * 0.6}*sin(t*29.7)':eval=frame`,
+      `:brightness='${flickerExpression(preset.flicker)}':eval=frame`,
     `curves=r='0/0.05 0.5/0.52 1/0.95':g='0/0.045 1/0.94':b='0/0.08 1/0.88'`,
     `vignette=${preset.vignette}`,
     `noise=alls=${preset.grain}:allf=t+u`
