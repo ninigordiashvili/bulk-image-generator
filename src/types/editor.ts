@@ -98,6 +98,8 @@ export interface RenderRequest {
   audio: string | null;
   total: number;
   settings: RenderSettings;
+  /** Text shown over the picture. Absent on an older client's request. */
+  moments?: TextMoment[];
 }
 
 export type JobPhase =
@@ -185,3 +187,33 @@ export const MAX_IMAGES = 600;
 
 /** Video containers the editor will take alongside stills. */
 export const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "webm"] as const;
+
+/** How a text moment arrives on screen. */
+export type MomentAnimation = "rise" | "fade" | "drop";
+
+/**
+ * A phrase shown over the picture at a given moment.
+ *
+ * Times are absolute against the narration, the same as cues — the renderer
+ * rebases them onto whichever segments they land in.
+ */
+export interface TextMoment {
+  id: string;
+  text: string;
+  start: number;
+  duration: number;
+  animation: MomentAnimation;
+  /** How much the picture behind is dimmed, 0 to 0.8. */
+  darken: number;
+  /** Text height as a fraction of frame height, so it scales with the export. */
+  size: number;
+}
+
+export const MOMENT_DEFAULTS = {
+  duration: 4,
+  animation: "rise" as MomentAnimation,
+  darken: 0.35,
+  size: 0.12,
+};
+
+export const MAX_MOMENTS = 60;

@@ -8,7 +8,10 @@ import type {
   RenderClip,
   RenderRequest,
   RenderSettings,
+  TextMoment,
 } from "@/types/editor";
+import { MAX_MOMENTS } from "@/types/editor";
+import { overlayChain } from "./textOverlay";
 import { FFMPEG, FfmpegError, probeDuration, run } from "./ffmpeg";
 import { outputPath, resolveInside, setPhase, type Job } from "./jobs";
 
@@ -33,6 +36,13 @@ export interface PlannedSegment {
   sourceSeconds: number;
   /** How much the slot outruns the footage. 1 means play at normal speed. */
   stretch: number;
+  /**
+   * Where this segment sits in the finished film. Text moments are placed
+   * against the narration, not against a clip, so they need this to be rebased
+   * onto the segment's own clock.
+   */
+  startSeconds: number;
+  endSeconds: number;
   file: string;
 }
 
@@ -74,6 +84,11 @@ export function planSegments(
       frames,
       sourceSeconds,
       stretch,
+      // From the frame numbers, not from clip.start — the cut is placed by
+      // rounding, and a moment has to line up with where the cut actually
+      // landed rather than where it was asked for.
+      startSeconds: frameAt(clip.start) / fps,
+      endSeconds: frameAt(clip.end) / fps,
       file: `seg-${String(index).padStart(4, "0")}.ts`,
     });
   });
@@ -306,7 +321,8 @@ export function videoChain(
 export function segmentArgs(
   segment: PlannedSegment,
   settings: RenderSettings,
-  outDir: string
+  outDir: string,
+  moments: TextMoment[] = []
 ): string[] {
   const { width, height, fps } = settings;
   const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y"];
@@ -344,7 +360,12 @@ export function segmentArgs(
   // The look goes on last, over whatever the clip turned out to be — and only
   // where the settings allow it, which is never on a talking face.
   const film = segment.film ? filmChain(settings.film) : "";
-  args.push("-vf", [chain, film, "format=yuv420p"].filter(Boolean).join(","));
+
+  // Text sits above the look: grain and vignette belong to the picture, and a
+  // caption is not part of the picture.
+  const text = overlayChain(moments, segment.startSeconds, segment.endSeconds, height);
+
+  args.push("-vf", [chain, film, text, "format=yuv420p"].filter(Boolean).join(","));
 
   args.push(
     "-frames:v", String(segment.frames),
@@ -467,7 +488,15 @@ export async function renderJob(job: Job, request: RenderRequest): Promise<void>
     job.status.total = segments.length;
     setPhase(job, "rendering", `Rendering ${segments.length} clips…`);
 
-    await renderSegments(job, segments, settings, segmentDir, controller);
+    // Sorted and capped here rather than trusted from the request: the chain
+    // is built per segment, and an unbounded list would be an unbounded filter
+    // graph on every one of them.
+    const moments = (request.moments ?? [])
+      .filter((moment) => moment.text.trim().length > 0 && moment.duration > 0)
+      .slice(0, MAX_MOMENTS)
+      .sort((a, b) => a.start - b.start);
+
+    await renderSegments(job, segments, settings, segmentDir, controller, moments);
 
     setPhase(job, "muxing", "Joining clips and adding audio…");
 
@@ -539,7 +568,8 @@ async function renderSegments(
   segments: PlannedSegment[],
   settings: RenderSettings,
   segmentDir: string,
-  controller: AbortController
+  controller: AbortController,
+  moments: TextMoment[]
 ): Promise<void> {
   const { signal } = controller;
   let next = 0;
@@ -552,7 +582,7 @@ async function renderSegments(
       if (index >= segments.length) return;
       const segment = segments[index];
       try {
-        await run(FFMPEG, segmentArgs(segment, settings, segmentDir), { signal });
+        await run(FFMPEG, segmentArgs(segment, settings, segmentDir, moments), { signal });
       } catch (error) {
         if (signal.aborted) return;
         const name = segment.source ? path.basename(segment.source) : "black gap";

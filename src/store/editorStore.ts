@@ -9,6 +9,8 @@ import { uploadAll } from "@/lib/editor/upload";
 import {
   DEFAULT_SETTINGS,
   MAX_IMAGES,
+  MAX_MOMENTS,
+  MOMENT_DEFAULTS,
   VIDEO_EXTENSIONS,
   type ClipKind,
   type CreateJobResponse,
@@ -18,8 +20,14 @@ import {
   type RenderClip,
   type RenderRequest,
   type RenderSettings,
+  type TextMoment,
   type ZoomDirection,
 } from "@/types/editor";
+import {
+  findMoments,
+  parsePastedTranscript,
+  type MomentCandidate,
+} from "@/lib/editor/transcript";
 
 /**
  * A visual the editor is holding: a still, a generated motion clip, or a
@@ -96,12 +104,22 @@ interface PersistedSettings {
   leadIn: LeadIn;
   tailSeconds: number;
   fileName: string;
+  /**
+   * The transcript and the moments picked out of it. Re-dropping the media is
+   * one drag; reading a transcript and choosing the four moments in it that
+   * deserve text is the actual work, and losing it to a reload would hurt.
+   */
+  transcript: string;
+  moments: TextMoment[];
 }
 
 interface EditorStore extends PersistedSettings {
   images: EditorImage[];
   audio: AudioTrack | null;
   export: ExportState;
+
+  /** Candidates found in the transcript — nothing is drawn until one is picked. */
+  candidates: MomentCandidate[];
 
   addImages: (files: File[]) => void;
   analyse: (id: string) => Promise<void>;
@@ -116,6 +134,13 @@ interface EditorStore extends PersistedSettings {
   setLeadIn: (leadIn: LeadIn) => void;
   setTailSeconds: (seconds: number) => void;
   setFileName: (name: string) => void;
+
+  setTranscript: (text: string) => void;
+  addMoment: (candidate: MomentCandidate) => void;
+  addBlankMoment: (start: number) => void;
+  updateMoment: (id: string, patch: Partial<TextMoment>) => void;
+  removeMoment: (id: string) => void;
+  clearMoments: () => void;
 
   startExport: () => Promise<void>;
   cancelExport: () => void;
@@ -140,6 +165,10 @@ export const useEditorStore = create<EditorStore>()(
       images: [],
       audio: null,
       export: IDLE_EXPORT,
+
+      transcript: "",
+      candidates: [],
+      moments: [],
 
       settings: DEFAULT_SETTINGS,
       zoom: "in",
@@ -305,6 +334,63 @@ export const useEditorStore = create<EditorStore>()(
         set((state) => ({ tailSeconds, export: invalidate(state) })),
       setFileName: (fileName) => set({ fileName }),
 
+      setTranscript: (text) =>
+        set((state) => ({
+          transcript: text,
+          // Re-scanning replaces the candidate list, but never the picks: the
+          // ids are derived from position in the transcript, so a moment
+          // already chosen stays chosen through an edit elsewhere in the text.
+          candidates: text.trim() ? findMoments(parsePastedTranscript(text)) : [],
+          export: invalidate(state),
+        })),
+
+      addMoment: (candidate) =>
+        set((state) => {
+          if (state.moments.some((moment) => moment.id === candidate.id)) return state;
+          if (state.moments.length >= MAX_MOMENTS) return state;
+          const moment: TextMoment = {
+            id: candidate.id,
+            text: candidate.text,
+            start: candidate.start,
+            ...MOMENT_DEFAULTS,
+          };
+          return {
+            moments: [...state.moments, moment].sort((a, b) => a.start - b.start),
+            export: invalidate(state),
+          };
+        }),
+
+      addBlankMoment: (start) =>
+        set((state) => {
+          if (state.moments.length >= MAX_MOMENTS) return state;
+          const moment: TextMoment = {
+            id: `own-${Date.now().toString(36)}-${state.moments.length}`,
+            text: "",
+            start,
+            ...MOMENT_DEFAULTS,
+          };
+          return {
+            moments: [...state.moments, moment].sort((a, b) => a.start - b.start),
+            export: invalidate(state),
+          };
+        }),
+
+      updateMoment: (id, patch) =>
+        set((state) => ({
+          moments: state.moments
+            .map((moment) => (moment.id === id ? { ...moment, ...patch } : moment))
+            .sort((a, b) => a.start - b.start),
+          export: invalidate(state),
+        })),
+
+      removeMoment: (id) =>
+        set((state) => ({
+          moments: state.moments.filter((moment) => moment.id !== id),
+          export: invalidate(state),
+        })),
+
+      clearMoments: () => set((state) => ({ moments: [], export: invalidate(state) })),
+
       startExport: async () => {
         const state = get();
         if (state.export.phase === "uploading" || state.export.phase === "rendering") {
@@ -394,6 +480,7 @@ export const useEditorStore = create<EditorStore>()(
             audio: state.audio ? (stored.get("__audio") ?? null) : null,
             total: timeline.total,
             settings: state.settings,
+            moments: state.moments.filter((moment) => moment.text.trim().length > 0),
           };
 
           const started = (await postJson(
@@ -468,6 +555,8 @@ export const useEditorStore = create<EditorStore>()(
         leadIn: state.leadIn,
         tailSeconds: state.tailSeconds,
         fileName: state.fileName,
+        transcript: state.transcript,
+        moments: state.moments,
       }),
       /**
        * `settings` is one stored object, and the default merge replaces it
@@ -478,10 +567,16 @@ export const useEditorStore = create<EditorStore>()(
        */
       merge: (persisted, current) => {
         const saved = (persisted ?? {}) as Partial<PersistedSettings>;
+        const transcript = saved.transcript ?? "";
         return {
           ...current,
           ...saved,
           settings: { ...DEFAULT_SETTINGS, ...(saved.settings ?? {}) },
+          moments: saved.moments ?? [],
+          transcript,
+          // Derived from the transcript, so it is rebuilt rather than stored —
+          // otherwise a change to the detector would never reach saved work.
+          candidates: transcript.trim() ? findMoments(parsePastedTranscript(transcript)) : [],
         };
       },
     }

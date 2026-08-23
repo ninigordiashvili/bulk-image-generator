@@ -4,9 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatTime } from "@/lib/editor/format";
 import { applyLook } from "@/lib/editor/filmPreview";
 import { BitmapCache } from "@/lib/editor/media";
+import { drawMoments } from "@/lib/editor/momentPreview";
 import { clipAt, clipZoom, type Timeline } from "@/lib/editor/timeline";
 import type { AudioTrack, EditorImage } from "@/store/editorStore";
-import type { FilmLook, ZoomDirection } from "@/types/editor";
+import type { FilmLook, TextMoment, ZoomDirection } from "@/types/editor";
 import { Filmstrip } from "./Filmstrip";
 
 /** The canvas the preview draws into. Fixed, and independent of export size —
@@ -25,6 +26,7 @@ interface Props {
   zoomAmount: number;
   zoomAmountMotion: number;
   film: FilmLook;
+  moments: TextMoment[];
   maxStretch: number;
   thumbnails: Map<string, string>;
   onToggleImage: (id: string) => void;
@@ -38,6 +40,7 @@ export function PreviewStage({
   zoomAmount,
   zoomAmountMotion,
   film,
+  moments,
   maxStretch,
   thumbnails,
   onToggleImage,
@@ -293,6 +296,9 @@ export function PreviewStage({
         // Only stills and motion clips wear the look, exactly as they do in
         // the render — a talking face takes neither grain nor zoom.
         applyLook(context, clip && clip.kind !== "avatar" ? film : "off", time, paint);
+        // Text goes on above the look, as it does in the render: grain belongs
+        // to the picture, and a caption is not part of the picture.
+        drawMoments(context, moments, time, PREVIEW_WIDTH, PREVIEW_HEIGHT);
       }
 
       if (playheadRef.current && total > 0) {

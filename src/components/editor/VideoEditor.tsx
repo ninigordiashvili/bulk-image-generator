@@ -10,11 +10,13 @@ import { ExportPanel } from "./ExportPanel";
 import { MediaIntake } from "./MediaIntake";
 import { PreviewStage } from "./PreviewStage";
 import { SettingsPanel } from "./SettingsPanel";
+import { TextMoments } from "./TextMoments";
 
 export function VideoEditor({ renderable }: { renderable: boolean }) {
   const images = useEditorStore((state) => state.images);
   const audio = useEditorStore((state) => state.audio);
   const settings = useEditorStore((state) => state.settings);
+  const moments = useEditorStore((state) => state.moments);
   const zoom = useEditorStore((state) => state.zoom);
   const leadIn = useEditorStore((state) => state.leadIn);
   const tailSeconds = useEditorStore((state) => state.tailSeconds);
@@ -100,6 +102,7 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
             zoomAmount={settings.zoomAmount}
             zoomAmountMotion={settings.zoomAmountMotion}
             film={settings.film}
+            moments={moments}
             maxStretch={settings.maxStretch}
             thumbnails={thumbnails}
             onToggleImage={toggleImage}
@@ -154,6 +157,8 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
             onLeadIn={setLeadIn}
             onTailSeconds={setTailSeconds}
           />
+
+          <TextMoments disabled={busy} />
 
           {timeline.clips.length > 0 && (
             <p className="px-1 text-[11px] text-muted">
