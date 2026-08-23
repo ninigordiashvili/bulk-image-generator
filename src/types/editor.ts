@@ -128,6 +128,22 @@ export interface UploadResponse {
   bytes: number;
 }
 
+/** What joining a set of voice tracks did, so the UI can say so. */
+export interface PaceReport {
+  stored: string;
+  duration: number;
+  originalDuration: number;
+  tightened: number;
+  removed: number;
+  longestGap: number;
+  parts: number;
+}
+
+export interface PaceResponse {
+  ok: true;
+  report: PaceReport;
+}
+
 export interface CreateJobResponse {
   ok: true;
   id: string;

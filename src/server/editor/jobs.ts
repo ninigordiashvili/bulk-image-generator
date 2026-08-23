@@ -20,6 +20,8 @@ export interface Job {
   cancelRequested: boolean;
   /** Next image index, so uploads get collision-free names on the server. */
   nextImage: number;
+  /** The same for voice tracks waiting to be joined into a bed. */
+  nextVoice: number;
 }
 
 /** Uploads and intermediates are scratch — they live in the OS temp dir. */
@@ -62,6 +64,7 @@ export async function createJob(): Promise<Job> {
     controller: null,
     cancelRequested: false,
     nextImage: 0,
+    nextVoice: 0,
     status: {
       id,
       phase: "new",

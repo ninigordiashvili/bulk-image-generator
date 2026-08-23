@@ -54,7 +54,11 @@ export async function POST(
   const offset = Number(params.get("offset") ?? "0");
   const stored = params.get("stored");
 
-  if (kind !== "image" && kind !== "audio") return fail("Unknown upload kind.");
+  // `voice` is one of several tracks waiting to be joined into a bed; `audio`
+  // is the bed itself, of which there is only ever one.
+  if (kind !== "image" && kind !== "audio" && kind !== "voice") {
+    return fail("Unknown upload kind.");
+  }
   if (!Number.isInteger(offset) || offset < 0) return fail("Bad chunk offset.");
 
   const extension = extensionOf(name);
@@ -75,14 +79,16 @@ export async function POST(
     storedName =
       kind === "audio"
         ? `audio.${extension}`
-        : `img-${String(job.nextImage++).padStart(4, "0")}.${extension}`;
-    const resolved = resolveInside(job, kind === "audio" ? "" : "images", storedName);
+        : kind === "voice"
+          ? `voice-${String(job.nextVoice++).padStart(3, "0")}.${extension}`
+          : `img-${String(job.nextImage++).padStart(4, "0")}.${extension}`;
+    const resolved = resolveInside(job, kind === "image" ? "images" : "", storedName);
     if (!resolved) return fail("Could not place that file.", 500);
     target = resolved;
     await fs.writeFile(target, new Uint8Array(0));
   } else {
     if (!stored) return fail("Continuation chunk with no file name.");
-    const resolved = resolveInside(job, kind === "audio" ? "" : "images", stored);
+    const resolved = resolveInside(job, kind === "image" ? "images" : "", stored);
     if (!resolved) return fail("Rejected file name.");
     target = resolved;
     storedName = stored;
@@ -99,7 +105,7 @@ export async function POST(
   const body = Buffer.from(await request.arrayBuffer());
   if (body.byteLength === 0 && offset === 0) return fail(`${name} is empty.`);
 
-  const limit = kind === "audio" ? MAX_AUDIO_BYTES : MAX_IMAGE_BYTES;
+  const limit = kind === "image" ? MAX_IMAGE_BYTES : MAX_AUDIO_BYTES;
   if (offset + body.byteLength > limit) {
     await fs.rm(target, { force: true }).catch(() => {});
     return fail(

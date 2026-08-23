@@ -2,14 +2,16 @@
 
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { analyseClip, classify, type Envelope } from "@/lib/editor/analyse";
+import { analyseBed, analyseClip, classify, type Envelope } from "@/lib/editor/analyse";
+import { inScriptOrder } from "@/lib/editor/order";
 import { buildTimeline, clipZoom, type Timeline } from "@/lib/editor/timeline";
 import { parseTimestamp } from "@/lib/editor/timestamp";
-import { uploadAll } from "@/lib/editor/upload";
+import { uploadAll, uploadFile } from "@/lib/editor/upload";
 import {
   DEFAULT_SETTINGS,
   MAX_IMAGES,
   VIDEO_EXTENSIONS,
+  type PaceReport,
   type ClipKind,
   type CreateJobResponse,
   type ErrorResponse,
@@ -67,6 +69,22 @@ export interface AudioTrack {
   envelope: Envelope | null;
 }
 
+/**
+ * Several takes waiting to become one narration bed. Held apart from the bed
+ * itself because joining them is a deliberate step, not something that should
+ * happen the moment files are dropped.
+ */
+export interface VoiceoverBatch {
+  files: File[];
+  busy: boolean;
+  error: string | null;
+  report: PaceReport | null;
+  /** Where to download the joined result, once there is one. */
+  url: string | null;
+  maxGap: number;
+  keepGap: number;
+}
+
 export type ExportPhase = "idle" | "uploading" | "rendering" | "done" | "error";
 
 export interface ExportState {
@@ -101,6 +119,7 @@ interface PersistedSettings {
 interface EditorStore extends PersistedSettings {
   images: EditorImage[];
   audio: AudioTrack | null;
+  voiceovers: VoiceoverBatch;
   export: ExportState;
 
   addImages: (files: File[]) => void;
@@ -110,6 +129,10 @@ interface EditorStore extends PersistedSettings {
   toggleImage: (id: string) => void;
   clearImages: () => void;
   setAudio: (track: AudioTrack | null) => void;
+  addVoiceovers: (files: File[]) => void;
+  removeVoiceover: (name: string) => void;
+  setVoicePacing: (patch: { maxGap?: number; keepGap?: number }) => void;
+  joinVoiceovers: () => Promise<void>;
 
   setSettings: (patch: Partial<RenderSettings>) => void;
   setZoom: (zoom: ZoomDirection) => void;
@@ -139,6 +162,17 @@ export const useEditorStore = create<EditorStore>()(
     (set, get) => ({
       images: [],
       audio: null,
+      voiceovers: {
+        files: [],
+        busy: false,
+        error: null,
+        report: null,
+        url: null,
+        // A second of quiet between sentences reads as a breath; much more and
+        // it reads as a mistake.
+        maxGap: 1,
+        keepGap: 0.8,
+      },
       export: IDLE_EXPORT,
 
       settings: DEFAULT_SETTINGS,
@@ -292,6 +326,128 @@ export const useEditorStore = create<EditorStore>()(
         // Every talking clip's position is relative to the bed, so a new bed
         // means every one of them has to find its place again.
         get().realign();
+      },
+
+      addVoiceovers: (files) =>
+        set((state) => {
+          const seen = new Set(state.voiceovers.files.map((f) => f.name));
+          const added = files.filter(
+            (file) =>
+              !seen.has(file.name) &&
+              (file.type.startsWith("audio/") ||
+                /\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(file.name))
+          );
+          return {
+            voiceovers: {
+              ...state.voiceovers,
+              // Sorted by the names the user gave them, so 2 comes before 10.
+              files: inScriptOrder([...state.voiceovers.files, ...added], (f) => f.name),
+              // A new take invalidates whatever was joined before it.
+              report: null,
+              url: null,
+              error: null,
+            },
+          };
+        }),
+
+      removeVoiceover: (name) =>
+        set((state) => ({
+          voiceovers: {
+            ...state.voiceovers,
+            files: state.voiceovers.files.filter((file) => file.name !== name),
+            report: null,
+            url: null,
+          },
+        })),
+
+      setVoicePacing: (patch) =>
+        set((state) => {
+          const maxGap = patch.maxGap ?? state.voiceovers.maxGap;
+          return {
+            voiceovers: {
+              ...state.voiceovers,
+              maxGap,
+              // A pause can't be shortened to longer than the cap that caught it.
+              keepGap: Math.min(patch.keepGap ?? state.voiceovers.keepGap, maxGap),
+              report: null,
+              url: null,
+            },
+          };
+        }),
+
+      joinVoiceovers: async () => {
+        const { voiceovers } = get();
+        if (voiceovers.files.length === 0 || voiceovers.busy) return;
+
+        set((state) => ({
+          voiceovers: { ...state.voiceovers, busy: true, error: null },
+        }));
+
+        let jobId: string | null = null;
+        try {
+          const created = (await postJson("/api/editor/job", null, new AbortController().signal)) as
+            | CreateJobResponse
+            | ErrorResponse;
+          if (!created.ok) throw new Error(created.error);
+          jobId = created.id;
+
+          // Uploaded in script order, and the server joins in the order it is
+          // given — the stored names only record what arrived first.
+          const stored: string[] = [];
+          for (const file of voiceovers.files) {
+            stored.push(await uploadFile({ jobId, kind: "voice", file }));
+          }
+
+          const joined = (await postJson(
+            `/api/editor/job/${jobId}/voiceover`,
+            {
+              files: stored,
+              maxGap: voiceovers.maxGap,
+              keepGap: voiceovers.keepGap,
+              thresholdDb: -35,
+            },
+            new AbortController().signal
+          )) as { ok: true; report: PaceReport } | ErrorResponse;
+          if (!joined.ok) throw new Error(joined.error);
+
+          // Fetched back so it becomes an ordinary audio track: the editor
+          // treats it exactly like a file that was dropped on it.
+          const url = `/api/editor/job/${jobId}/voiceover/download`;
+          const response = await fetch(url);
+          if (!response.ok) throw new Error("The joined track could not be read back.");
+          const blob = await response.blob();
+          const file = new File([blob], "narration.m4a", { type: "audio/mp4" });
+
+          const objectUrl = URL.createObjectURL(file);
+          const envelope = await analyseBed(file);
+          get().setAudio({
+            file,
+            name: `narration.m4a — ${voiceovers.files.length} takes joined`,
+            duration: joined.report.duration,
+            url: objectUrl,
+            envelope,
+          });
+
+          set((state) => ({
+            voiceovers: {
+              ...state.voiceovers,
+              busy: false,
+              report: joined.report,
+              url: objectUrl,
+            },
+          }));
+        } catch (error) {
+          set((state) => ({
+            voiceovers: {
+              ...state.voiceovers,
+              busy: false,
+              error: error instanceof Error ? error.message : "Could not join those takes.",
+            },
+          }));
+        } finally {
+          // The bed is in hand now; the scratch copies are not needed.
+          if (jobId) void fetch(`/api/editor/job/${jobId}`, { method: "DELETE" }).catch(() => {});
+        }
       },
 
       setSettings: (patch) =>

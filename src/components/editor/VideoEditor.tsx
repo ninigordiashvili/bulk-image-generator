@@ -10,10 +10,12 @@ import { ExportPanel } from "./ExportPanel";
 import { MediaIntake } from "./MediaIntake";
 import { PreviewStage } from "./PreviewStage";
 import { SettingsPanel } from "./SettingsPanel";
+import { VoiceoverJoiner } from "./VoiceoverJoiner";
 
 export function VideoEditor({ renderable }: { renderable: boolean }) {
   const images = useEditorStore((state) => state.images);
   const audio = useEditorStore((state) => state.audio);
+  const voiceovers = useEditorStore((state) => state.voiceovers);
   const settings = useEditorStore((state) => state.settings);
   const zoom = useEditorStore((state) => state.zoom);
   const leadIn = useEditorStore((state) => state.leadIn);
@@ -26,6 +28,10 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
   const toggleImage = useEditorStore((state) => state.toggleImage);
   const clearImages = useEditorStore((state) => state.clearImages);
   const setAudio = useEditorStore((state) => state.setAudio);
+  const addVoiceovers = useEditorStore((state) => state.addVoiceovers);
+  const removeVoiceover = useEditorStore((state) => state.removeVoiceover);
+  const setVoicePacing = useEditorStore((state) => state.setVoicePacing);
+  const joinVoiceovers = useEditorStore((state) => state.joinVoiceovers);
   const setSettings = useEditorStore((state) => state.setSettings);
   const setZoom = useEditorStore((state) => state.setZoom);
   const setLeadIn = useEditorStore((state) => state.setLeadIn);
@@ -119,6 +125,19 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
             onImages={addImages}
             onClearImages={clearImages}
           />
+
+          {/* Above the export, because joining the takes is the step that comes
+              first when the narration arrives as a folder rather than a file. */}
+          {renderable && (
+            <VoiceoverJoiner
+              batch={voiceovers}
+              disabled={busy}
+              onAdd={addVoiceovers}
+              onRemove={removeVoiceover}
+              onPacing={setVoicePacing}
+              onJoin={() => void joinVoiceovers()}
+            />
+          )}
 
           <ExportPanel
             state={exportState}

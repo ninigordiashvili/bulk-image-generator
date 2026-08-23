@@ -350,6 +350,39 @@ VideoToolbox serialises on one engine. Measured at 1080p30 it was ~20% slower
 than x264 *and* produced a larger file. It's kept as an option for machines with
 few cores, or when you want the CPU back while a render runs.
 
+## Joining voiceovers
+
+Recorded narration usually arrives as a folder of takes — `1.wav`, `2.wav`,
+`3.wav` — each with a beat of room tone at either end and uneven pauses between
+sentences. Joined naively, every seam becomes a two-second hole. The editor's
+**Join voiceovers** panel takes the folder, joins it in script order, and
+shortens any pause past a cap.
+
+**Only the excess is cut.** A pause longer than `maxGap` loses everything past
+`keepGap`; a shorter one is left exactly as recorded, because a breath between
+sentences is part of the read and a silence is not. Speech is never touched —
+measured across a five-take fixture, all twenty seconds of it survived intact
+while nine seconds of dead air came out.
+
+The obvious filter for this is `silenceremove`, and it is the wrong one: its
+`stop_duration` is a threshold, not a cap. Set to one second, a two-second pause
+does not become one second — it very nearly disappears, and at 0.8 the
+one-second pauses vanish too. So the pauses are found with `silencedetect`
+first, and only the surplus of each is dropped with an `aselect` expression.
+
+**Joined first, tightened second.** The silence at the end of one take and the
+start of the next are one pause to a listener; capping them separately would
+leave two.
+
+**Script order comes from the names you gave the files**, not from the order
+they were uploaded — `2` before `10`, and neither depends on which finished
+uploading first. That sorting lives on the client for exactly that reason: by
+the time a take reaches the server it is called `voice-004`, and that number
+records arrival, not intent. Sorting *those* is how the first version of this
+played take five first.
+
+The result loads straight in as the narration bed, and is downloadable.
+
 ## Clips on the timeline
 
 The editor takes video alongside stills, placed by the same filename cue, and

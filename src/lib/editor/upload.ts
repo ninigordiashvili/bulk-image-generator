@@ -7,9 +7,15 @@ import type { ErrorResponse, UploadResponse } from "@/types/editor";
  */
 const CHUNK_BYTES = 4 * 1024 * 1024;
 
+/**
+ * `voice` is one of several takes waiting to be joined into a bed; `audio` is
+ * the bed itself, of which a job holds only one.
+ */
+export type UploadKind = "image" | "audio" | "voice";
+
 export interface UploadTarget {
   jobId: string;
-  kind: "image" | "audio";
+  kind: UploadKind;
   file: File;
 }
 
@@ -63,7 +69,7 @@ export async function uploadFile(
 /** Uploads many files with a few in flight at once, reporting bytes as they go. */
 export async function uploadAll(
   jobId: string,
-  files: { key: string; kind: "image" | "audio"; file: File }[],
+  files: { key: string; kind: UploadKind; file: File }[],
   onProgress: (sentBytes: number, doneCount: number) => void,
   signal?: AbortSignal,
   concurrency = 4
