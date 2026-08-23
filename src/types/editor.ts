@@ -131,6 +131,7 @@ export interface UploadResponse {
 /** What joining a set of voice tracks did, so the UI can say so. */
 export interface PaceReport {
   stored: string;
+  storedMp3: string;
   duration: number;
   originalDuration: number;
   tightened: number;

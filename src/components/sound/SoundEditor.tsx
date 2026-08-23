@@ -21,8 +21,10 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
   const error = useVoiceoverStore((state) => state.error);
   const report = useVoiceoverStore((state) => state.report);
   const url = useVoiceoverStore((state) => state.url);
+  const urlMp3 = useVoiceoverStore((state) => state.urlMp3);
   const maxGap = useVoiceoverStore((state) => state.maxGap);
   const keepGap = useVoiceoverStore((state) => state.keepGap);
+  const leadIn = useVoiceoverStore((state) => state.leadIn);
 
   const addFiles = useVoiceoverStore((state) => state.addFiles);
   const remove = useVoiceoverStore((state) => state.remove);
@@ -222,11 +224,34 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
               />
             </label>
 
+            <label className="block">
+              <span className="flex items-baseline justify-between text-xs text-muted">
+                <span>Breath before the next word</span>
+                <span className="font-mono text-foreground">{leadIn.toFixed(2)}s</span>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0.05, keepGap)}
+                step={0.05}
+                value={leadIn}
+                disabled={locked}
+                onChange={(event) => setPacing({ leadIn: Number(event.target.value) })}
+                className="mt-1 w-full accent-[var(--accent)] disabled:opacity-40"
+              />
+            </label>
+
             <p className="text-[11px] text-muted">
               A pause shorter than the cap is left exactly as recorded — a breath
-              between sentences is part of the read. Speech is never touched, and
-              the gap where two takes meet is treated as one pause rather than
-              two.
+              between sentences is part of the read. The gap where two takes meet
+              is treated as one pause rather than two.
+            </p>
+            <p className="text-[11px] text-muted">
+              Speech is never touched. Silence detection calls a pause over a
+              moment <em>after</em> the word has already started, so the cut
+              stops short by the breath above and lets the real run-up back in —
+              otherwise the first consonant gets shaved off and the join sounds
+              clipped.
             </p>
 
             <button
@@ -262,9 +287,18 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
                 {report.removed.toFixed(1)}s of dead air removed.
               </p>
               <audio src={url} controls className="w-full" />
-              <a href={url} download="narration.m4a" className="btn-primary block text-center">
-                Download narration.m4a
-              </a>
+              <div className="grid grid-cols-2 gap-2">
+                <a href={url} download="narration.m4a" className="btn-primary text-center">
+                  narration.m4a
+                </a>
+                <a
+                  href={urlMp3 ?? url}
+                  download="narration.mp3"
+                  className="btn-primary text-center"
+                >
+                  narration.mp3
+                </a>
+              </div>
               <p className="text-[11px] text-muted">
                 Drop this into the{" "}
                 <Link href="/editor" className="underline hover:text-foreground">

@@ -25,11 +25,24 @@ export interface PaceOptions {
   keepGap: number;
   /** How quiet counts as a pause. -35 to -45 dB covers most recordings. */
   thresholdDb: number;
+  /**
+   * Real audio kept immediately before speech resumes.
+   *
+   * A detector calls the pause over only once the level crosses the threshold,
+   * which is *after* the word has begun — measured at 22ms late on a soft
+   * attack at -35 dB, and worse on a real consonant, which starts far quieter
+   * than a vowel. Cutting up to that point takes the front off the word: the
+   * clipped "s" or "f" that makes a tightened read sound wrong. So the cut
+   * stops short, and the last of the pause is the original run-up to the word.
+   */
+  leadIn: number;
 }
 
 export interface PaceReport {
-  /** Stored basename of the joined track. */
+  /** Stored basename of the joined track, as m4a. */
   stored: string;
+  /** And as mp3, for anything that would rather have one. */
+  storedMp3: string;
   duration: number;
   originalDuration: number;
   /** How many pauses were long enough to shorten. */
@@ -82,16 +95,30 @@ export async function findSilences(
   return silences;
 }
 
-/** The stretches to cut: everything past `keepGap` of each over-long pause. */
+/**
+ * The stretches to cut out of each over-long pause.
+ *
+ * The pause still ends up `keepGap` long, but it is taken from both ends: the
+ * beginning, which is the tail of the word just spoken, and `leadIn` from the
+ * end, which is the run-up to the word about to be spoken. Only the dead middle
+ * goes. Taking it all from the front would leave the cut butted against the
+ * next word and shave its attack off.
+ */
 export function excessOf(
   silences: Silence[],
-  { maxGap, keepGap }: PaceOptions
+  { maxGap, keepGap, leadIn }: PaceOptions
 ): Silence[] {
   const cuts: Silence[] = [];
   for (const silence of silences) {
-    if (silence.end - silence.start <= maxGap) continue;
-    const from = silence.start + keepGap;
-    if (silence.end - from > 0.02) cuts.push({ start: from, end: silence.end });
+    const length = silence.end - silence.start;
+    if (length <= maxGap) continue;
+
+    // The lead can't be longer than the pause we're keeping, or the cut would
+    // start before the pause does.
+    const lead = Math.min(leadIn, keepGap);
+    const from = silence.start + (keepGap - lead);
+    const to = silence.end - lead;
+    if (to - from > 0.02) cuts.push({ start: from, end: to });
   }
   return cuts;
 }
@@ -135,6 +162,7 @@ export async function joinVoiceovers(
 
   const joined = path.join(job.dir, "voice-joined.wav");
   const output = path.join(job.dir, "voice-bed.m4a");
+  const outputMp3 = path.join(job.dir, "voice-bed.mp3");
 
   try {
     // Normalised to one rate and channel count first, or concat refuses a set
@@ -162,6 +190,8 @@ export async function joinVoiceovers(
     const removed = cuts.reduce((sum, cut) => sum + (cut.end - cut.start), 0);
     const select = selectExpression(cuts);
 
+    // Both formats from the same tightened audio, so they can't drift apart.
+    // Encoding twice costs a second or two on a track of any realistic length.
     await run(
       FFMPEG,
       ["-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -169,6 +199,15 @@ export async function joinVoiceovers(
        ...(select ? ["-af", select] : []),
        "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "1",
        "-movflags", "+faststart", output],
+      { signal }
+    );
+    await run(
+      FFMPEG,
+      ["-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+       "-i", joined,
+       ...(select ? ["-af", select] : []),
+       "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", "1",
+       outputMp3],
       { signal }
     );
 
@@ -181,6 +220,7 @@ export async function joinVoiceovers(
 
     return {
       stored: path.basename(output),
+      storedMp3: path.basename(outputMp3),
       duration,
       originalDuration,
       tightened: cuts.length,

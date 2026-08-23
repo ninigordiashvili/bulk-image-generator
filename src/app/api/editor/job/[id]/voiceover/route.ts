@@ -30,7 +30,13 @@ export async function POST(
   if (!job) return fail("No such editing session — reload the page.", 404);
   if (job.controller) return fail("This session is busy rendering.", 409);
 
-  let body: { files?: unknown; maxGap?: unknown; keepGap?: unknown; thresholdDb?: unknown };
+  let body: {
+    files?: unknown;
+    maxGap?: unknown;
+    keepGap?: unknown;
+    thresholdDb?: unknown;
+    leadIn?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -42,11 +48,18 @@ export async function POST(
   if (files.length > 100) return fail("That's more tracks than this will join at once.");
 
   const maxGap = clamp(Number(body.maxGap) || 1, 0.2, 10);
+  // A pause can't be shortened to longer than the cap that flagged it.
+  const keepGap = clamp(Number(body.keepGap) || 0.8, 0.05, maxGap);
   const options = {
     maxGap,
-    // A pause can't be shortened to longer than the cap that flagged it.
-    keepGap: clamp(Number(body.keepGap) || 0.8, 0.05, maxGap),
+    keepGap,
     thresholdDb: clamp(Number(body.thresholdDb) || -35, -60, -10),
+    // Nor can the run-up be longer than the pause it has to fit inside.
+    leadIn: clamp(
+      body.leadIn === undefined ? 0.2 : Number(body.leadIn) || 0,
+      0,
+      keepGap
+    ),
   };
 
   try {
