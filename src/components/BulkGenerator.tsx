@@ -99,12 +99,17 @@ export function BulkGenerator() {
           ))}
         </div>
 
-        {/* Its own route rather than a third tab: the editor holds an audio
-            track and a hundred decoded images, and unmounting all of that
-            every time someone glances at the queue would be its own bug. */}
-        <Link href="/editor" className="pill">
-          Video editor →
-        </Link>
+        {/* Their own routes rather than more tabs: each holds a lot of media
+            in memory, and unmounting all of it every time someone glances at
+            the queue would be its own bug. */}
+        <div className="flex gap-2">
+          <Link href="/sound" className="pill">
+            Sound editor →
+          </Link>
+          <Link href="/editor" className="pill">
+            Video editor →
+          </Link>
+        </div>
       </header>
 
       {mode === "videos" ? (

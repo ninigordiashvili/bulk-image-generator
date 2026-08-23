@@ -5,9 +5,11 @@ image models plus Veo 3.1 Lite and Grok Image-to-Video, with multi-account key
 support, a character-reference library, a style bible for cross-batch
 consistency, and a credit estimate learned from what kie actually bills.
 
-Plus a **video editor** (`/editor`) that cuts a generated batch to a voiceover:
-name each image for the second it should appear at, drop in the audio, and it
-renders a 1080p MP4 with ffmpeg.
+Plus two local tools: a **video editor** (`/editor`) that cuts a generated batch
+to a voiceover — name each image for the second it should appear at, drop in the
+audio, and it renders a 1080p MP4 with ffmpeg — and a **sound editor**
+(`/sound`) that joins a folder of voiceover takes into one narration bed and
+tightens the pauses.
 
 Everything runs locally: your own Next.js server plus the browser. No database, no
 cloud storage. Images live in memory and in the browser's IndexedDB; nothing leaves
@@ -350,13 +352,20 @@ VideoToolbox serialises on one engine. Measured at 1080p30 it was ~20% slower
 than x264 *and* produced a larger file. It's kept as an option for machines with
 few cores, or when you want the CPU back while a render runs.
 
-## Joining voiceovers
+## Sound editor
+
+`/sound` — the third tool, alongside the generator and the video editor.
 
 Recorded narration usually arrives as a folder of takes — `1.wav`, `2.wav`,
 `3.wav` — each with a beat of room tone at either end and uneven pauses between
-sentences. Joined naively, every seam becomes a two-second hole. The editor's
-**Join voiceovers** panel takes the folder, joins it in script order, and
-shortens any pause past a cap.
+sentences. Joined naively, every seam becomes a two-second hole. The sound
+editor takes the folder, joins it in script order, and shortens any pause past
+a cap.
+
+Its own page rather than a panel in the video editor: joining takes is what you
+do once when the narration comes back from wherever it was recorded, and editing
+is what you do afterwards with the result. The handoff between them is a file —
+download `narration.m4a` and drop it on the editor as the bed.
 
 **Only the excess is cut.** A pause longer than `maxGap` loses everything past
 `keepGap`; a shorter one is left exactly as recorded, because a breath between
@@ -381,7 +390,7 @@ the time a take reaches the server it is called `voice-004`, and that number
 records arrival, not intent. Sorting *those* is how the first version of this
 played take five first.
 
-The result loads straight in as the narration bed, and is downloadable.
+The result plays in the page and downloads as `narration.m4a`.
 
 ## Clips on the timeline
 
