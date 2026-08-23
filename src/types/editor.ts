@@ -5,6 +5,13 @@
  * ffmpeg on the server.
  */
 
+/**
+ * What a visual on the timeline is. The distinction drives everything that
+ * follows: a talking clip owns its length and takes no effects, while a still
+ * or a motion clip flexes to fit and wears whatever look is set.
+ */
+export type ClipKind = "still" | "motion" | "avatar";
+
 /** Which way an image drifts over its slot. `alternate` flips per clip. */
 export type ZoomDirection = "none" | "in" | "out" | "alternate";
 
@@ -28,20 +35,62 @@ export interface RenderSettings {
   height: number;
   fps: number;
   encoder: Encoder;
-  /** Peak extra scale, as a fraction: 0.08 = the image ends 8% larger. */
+  /**
+   * Peak extra scale for a **still**, as a fraction: 0.08 = it ends 8% larger.
+   * Named without a suffix because it predates the split and is what older
+   * saved settings carry; renaming it would silently reset everyone's choice.
+   */
   zoomAmount: number;
+  /**
+   * The same for a **motion clip**. Separate because the shot is already
+   * moving, so the amount that reads as a gentle drift over a still is usually
+   * too much on top of footage.
+   */
+  zoomAmountMotion: number;
   /** Seconds of audio fade at the tail. 0 disables it. */
   audioFadeOut: number;
   fileName: string;
+
+  /** Old-film treatment: moving grain, flicker, vignette, faded curves. */
+  film: FilmLook;
+  /**
+   * Which kinds the effects touch. Talking clips are excluded by default and
+   * in practice always: a zoom on a speaking face reads as a mistake, and
+   * grain over it fights the one thing the viewer is trying to read.
+   */
+  effectsOnStills: boolean;
+  effectsOnMotion: boolean;
+
+  /**
+   * A still or motion clip shorter than this is skipped rather than flashed.
+   * Avatars are exempt — they are never squeezed.
+   */
+  minVisualSeconds: number;
+  /**
+   * Cap on how far a motion clip may be slowed to fill its slot. Past roughly
+   * 2.5x, interpolation starts inventing visible nonsense around fast motion.
+   */
+  maxStretch: number;
 }
 
 /** One slot on the timeline. `file` is null for a black gap. */
 export interface RenderClip {
   file: string | null;
+  kind: ClipKind;
   start: number;
   end: number;
   zoom: ClipZoom;
+  /**
+   * For a video source: how much of it to use, from its own start. An avatar
+   * is cut here at the point the talking stops. Undefined for a still.
+   */
+  sourceSeconds?: number;
+  /** Whether the film look applies — resolved from the settings and the kind. */
+  film: boolean;
 }
+
+/** How heavy the old-film treatment is. */
+export type FilmLook = "off" | "subtle" | "medium" | "heavy";
 
 export interface RenderRequest {
   clips: RenderClip[];
@@ -104,9 +153,18 @@ export const DEFAULT_SETTINGS: RenderSettings = {
   fps: 30,
   encoder: "libx264",
   zoomAmount: 0.08,
+  zoomAmountMotion: 0.04,
   audioFadeOut: 1.5,
   fileName: "slideshow.mp4",
+  film: "off",
+  effectsOnStills: true,
+  effectsOnMotion: true,
+  minVisualSeconds: 2,
+  maxStretch: 2.5,
 };
 
-/** Upper bound on images per render — a guard against a stray folder drop. */
+/** Upper bound on visuals per render — a guard against a stray folder drop. */
 export const MAX_IMAGES = 600;
+
+/** Video containers the editor will take alongside stills. */
+export const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "webm"] as const;

@@ -11,7 +11,7 @@ import { MediaIntake } from "./MediaIntake";
 import { PreviewStage } from "./PreviewStage";
 import { SettingsPanel } from "./SettingsPanel";
 
-export function VideoEditor() {
+export function VideoEditor({ renderable }: { renderable: boolean }) {
   const images = useEditorStore((state) => state.images);
   const audio = useEditorStore((state) => state.audio);
   const settings = useEditorStore((state) => state.settings);
@@ -36,16 +36,17 @@ export function VideoEditor() {
   const dismissExport = useEditorStore((state) => state.dismissExport);
 
   const timeline = useMemo(
-    () => selectTimeline({ images, audio, tailSeconds, leadIn }),
-    [images, audio, tailSeconds, leadIn]
+    () => selectTimeline({ images, audio, tailSeconds, leadIn, settings }),
+    [images, audio, tailSeconds, leadIn, settings]
   );
 
   const thumbnails = useThumbnails(images);
   const busy = exportState.phase === "uploading" || exportState.phase === "rendering";
 
-  const firstCue = timeline.clips.find((clip) => clip.imageId)?.start ?? 0;
-  const blocker =
-    timeline.clips.length === 0
+  const firstCue = timeline.clips.find((clip) => clip.sourceId)?.start ?? 0;
+  const blocker = !renderable
+    ? "Rendering needs a local copy — see above."
+    : timeline.clips.length === 0
       ? images.length === 0
         ? "Add images named for their timestamps to get started."
         : "None of those filenames resolved to a cue inside the audio."
@@ -66,6 +67,24 @@ export function VideoEditor() {
         </Link>
       </header>
 
+      {/* Said before anything is uploaded. The timeline and preview still work
+          here — only the render needs a machine with a disk and ffmpeg. */}
+      {!renderable && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4">
+          <p className="text-sm font-medium text-amber-300">
+            This deployment can preview, but not export.
+          </p>
+          <p className="mt-1 text-xs text-amber-200/80">
+            Rendering shells out to ffmpeg, writes hundreds of megabytes of
+            intermediates, and takes minutes — none of which a serverless host
+            allows. Drop your files here to check the timeline and the cue
+            names, then run{" "}
+            <span className="font-mono">npm run dev</span> on your own machine
+            and export there. Image and video generation work fine on this copy.
+          </p>
+        </div>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(320px,1fr)]">
         <div className="space-y-4">
           <PreviewStage
@@ -74,6 +93,9 @@ export function VideoEditor() {
             audio={audio}
             zoom={zoom}
             zoomAmount={settings.zoomAmount}
+            zoomAmountMotion={settings.zoomAmountMotion}
+            film={settings.film}
+            maxStretch={settings.maxStretch}
             thumbnails={thumbnails}
             onToggleImage={toggleImage}
           />
@@ -104,7 +126,7 @@ export function VideoEditor() {
             fileName={fileName}
             clipCount={timeline.clips.length}
             total={timeline.total}
-            canExport={!busy && timeline.clips.length > 0}
+            canExport={renderable && !busy && timeline.clips.length > 0}
             blocker={blocker}
             onFileName={setFileName}
             onStart={() => void startExport()}
@@ -114,6 +136,8 @@ export function VideoEditor() {
 
           <SettingsPanel
             settings={settings}
+            hasAvatars={images.some((image) => image.kind === "avatar")}
+            hasMotion={images.some((image) => image.kind === "motion")}
             zoom={zoom}
             leadIn={leadIn}
             tailSeconds={tailSeconds}

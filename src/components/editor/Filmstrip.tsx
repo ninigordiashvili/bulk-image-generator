@@ -44,17 +44,17 @@ export function Filmstrip({
     <div ref={scrollerRef} className="flex gap-2 overflow-x-auto pb-2">
       {clips.map((clip, index) => {
         const active = index === activeIndex;
-        const thumb = clip.imageId ? thumbnails.get(clip.imageId) : undefined;
+        const thumb = clip.sourceId ? thumbnails.get(clip.sourceId) : undefined;
         return (
           <button
             key={clip.index}
             ref={active ? activeRef : undefined}
             type="button"
             onClick={() => onSeek(clip.start)}
-            onDoubleClick={() => clip.imageId && onToggleImage(clip.imageId)}
+            onDoubleClick={() => clip.sourceId && onToggleImage(clip.sourceId)}
             title={`${clip.label} — ${formatTime(clip.start, true)} for ${formatDuration(
               clip.end - clip.start
-            )}${clip.imageId ? "\nDouble-click to drop this image" : ""}`}
+            )}${clip.sourceId ? "\nDouble-click to drop this image" : ""}`}
             className={`group relative w-28 shrink-0 overflow-hidden rounded-lg border transition ${
               active ? "border-accent" : "border-line hover:border-accent/60"
             }`}
@@ -71,7 +71,7 @@ export function Filmstrip({
                 />
               ) : (
                 <div className="grid h-full place-items-center text-[10px] text-muted">
-                  {clip.imageId ? "…" : "black"}
+                  {clip.sourceId ? "…" : "black"}
                 </div>
               )}
             </div>

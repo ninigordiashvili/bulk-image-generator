@@ -2,7 +2,9 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type {
+  ClipKind,
   ClipZoom,
+  FilmLook,
   RenderClip,
   RenderRequest,
   RenderSettings,
@@ -18,13 +20,19 @@ import { outputPath, resolveInside, setPhase, type Job } from "./jobs";
  */
 const CONCURRENCY = Math.max(2, Math.min(6, os.cpus().length - 2));
 
-/** A clip's boundaries in whole frames. */
+/** A clip's boundaries in whole frames, and how to build it. */
 export interface PlannedSegment {
   index: number;
-  /** Absolute path to the source image, or null for a black gap. */
+  /** Absolute path to the source, or null for a black gap. */
   source: string | null;
+  kind: ClipKind;
   zoom: ClipZoom;
+  film: boolean;
   frames: number;
+  /** Seconds of the source to use; only meaningful for a video source. */
+  sourceSeconds: number;
+  /** How much the slot outruns the footage. 1 means play at normal speed. */
+  stretch: number;
   file: string;
 }
 
@@ -38,7 +46,8 @@ export interface PlannedSegment {
 export function planSegments(
   clips: RenderClip[],
   fps: number,
-  dir: string
+  dir: string,
+  maxStretch = 2.5
 ): PlannedSegment[] {
   const frameAt = (time: number) => Math.round(time * fps);
   const segments: PlannedSegment[] = [];
@@ -46,11 +55,25 @@ export function planSegments(
   clips.forEach((clip, index) => {
     const frames = frameAt(clip.end) - frameAt(clip.start);
     if (frames < 1) return;
+
+    const slotSeconds = frames / fps;
+    const sourceSeconds = clip.sourceSeconds ?? 0;
+    // A motion clip is slowed to fill its slot. An avatar never is: its length
+    // is its speech, and stretching it would put the lips out of time.
+    const stretch =
+      clip.kind === "motion" && sourceSeconds > 0
+        ? Math.min(maxStretch, Math.max(1, slotSeconds / sourceSeconds))
+        : 1;
+
     segments.push({
       index,
       source: clip.file ? path.join(dir, "images", clip.file) : null,
+      kind: clip.file ? clip.kind : "still",
       zoom: clip.file ? clip.zoom : "none",
+      film: clip.file ? clip.film : false,
       frames,
+      sourceSeconds,
+      stretch,
       file: `seg-${String(index).padStart(4, "0")}.ts`,
     });
   });
@@ -86,11 +109,11 @@ function fitChain(width: number, height: number): string {
 export function zoomChain(
   width: number,
   height: number,
-  fps: number,
   frames: number,
   zoom: ClipZoom,
   amount: number
 ): string {
+  if (zoom === "none" || amount <= 0) return "";
   const span = Math.max(1, frames - 1);
   const a = amount.toFixed(4);
   // `on` is the output frame index, so this runs 1 → 1+amount across the clip.
@@ -105,8 +128,9 @@ export function zoomChain(
   const dx = `(${width}/(2*${z}))`;
   const dy = `(${height}/(2*${z}))`;
 
+  // Fit is the caller's job: a still needs it first, a video clip has already
+  // had it, and doing it twice would resample for nothing.
   return (
-    `${fitChain(width, height)},` +
     `perspective=` +
     `x0='${halfX}-${dx}':y0='${halfY}-${dy}':` +
     `x1='${halfX}+${dx}':y1='${halfY}-${dy}':` +
@@ -114,8 +138,7 @@ export function zoomChain(
     `x3='${halfX}+${dx}':y3='${halfY}+${dy}':` +
     // Cubic keeps roughly twice the fine detail of linear here, for about a
     // quarter more time.
-    `sense=source:eval=frame:interpolation=cubic,` +
-    `fps=${fps},format=yuv420p`
+    `sense=source:eval=frame:interpolation=cubic`
   );
 }
 
@@ -154,6 +177,88 @@ export function codecArgs(settings: RenderSettings): string[] {
   ];
 }
 
+
+/**
+ * The old-film treatment.
+ *
+ * Four things, and the two that matter most only exist in motion:
+ *
+ *  - grain that re-randomises every frame (`allf=t`), not a fixed overlay —
+ *    static grain reads as a dirty lens, moving grain reads as film;
+ *  - flicker, a slight brightness wobble from two out-of-phase oscillators so
+ *    it never settles into an obvious rhythm;
+ *  - vignette and faded curves, which are just the look sitting still.
+ *
+ * No gate weave. A real projector drifts a pixel or two and it is authentic,
+ * but over a slideshow of stills it reads as camera shake rather than as film,
+ * and shake is not what anyone is asking a film look for.
+ *
+ * Grain is noise, and noise is what H.264 spends bits on, so a heavy setting
+ * will grow the file noticeably. That's the honest cost, not a bug.
+ */
+export function filmChain(look: FilmLook): string {
+  if (look === "off") return "";
+
+  const preset = {
+    subtle: { grain: 6, vignette: "PI/5", flicker: 0.012, sat: 0.9, contrast: 1.03 },
+    medium: { grain: 13, vignette: "PI/4.2", flicker: 0.022, sat: 0.76, contrast: 1.08 },
+    heavy: { grain: 24, vignette: "PI/3.6", flicker: 0.038, sat: 0.55, contrast: 1.14 },
+  }[look];
+
+  const parts: string[] = [];
+
+  parts.push(
+    `eq=saturation=${preset.sat}:contrast=${preset.contrast}` +
+      `:brightness='${preset.flicker}*sin(t*13.1)+${preset.flicker * 0.6}*sin(t*29.7)':eval=frame`,
+    `curves=r='0/0.05 0.5/0.52 1/0.95':g='0/0.045 1/0.94':b='0/0.08 1/0.88'`,
+    `vignette=${preset.vignette}`,
+    `noise=alls=${preset.grain}:allf=t+u`
+  );
+
+  return parts.join(",");
+}
+
+/**
+ * A video source, fitted to the frame.
+ *
+ * `stretch` above 1 slows the clip to fill its slot, and the interpolation is
+ * the expensive part of the whole render — around 70 seconds per stretched
+ * clip at 1080p. It earns that: repeating frames instead would judder, and
+ * judder is the thing the user was avoiding by hand.
+ *
+ * `tpad` covers the case where the footage still falls short after stretching
+ * — the last frame holds rather than the segment ending early and knocking
+ * everything after it out of place.
+ */
+export function videoChain(
+  width: number,
+  height: number,
+  fps: number,
+  frames: number,
+  stretch: number
+): string {
+  const parts = [fitChain(width, height)];
+
+  if (stretch > 1.001) {
+    parts.push(
+      `setpts=${stretch.toFixed(4)}*PTS`,
+      `minterpolate=fps=${fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`
+    );
+  } else {
+    parts.push(`fps=${fps}`);
+  }
+
+  const seconds = (frames / fps).toFixed(3);
+  parts.push(
+    `tpad=stop_mode=clone:stop_duration=${seconds}`,
+    `trim=duration=${seconds}`,
+    "setpts=PTS-STARTPTS",
+    `fps=${fps}`
+  );
+
+  return parts.join(",");
+}
+
 /** The full argument list for one segment. */
 export function segmentArgs(
   segment: PlannedSegment,
@@ -162,36 +267,41 @@ export function segmentArgs(
 ): string[] {
   const { width, height, fps } = settings;
   const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y"];
+  const isVideo = segment.kind !== "still";
+
+  let chain: string;
 
   if (segment.source === null) {
-    args.push(
-      "-f", "lavfi",
-      "-i", `color=c=black:s=${width}x${height}:r=${fps}`,
-      "-vf", "format=yuv420p"
-    );
-  } else if (segment.zoom === "none") {
-    // A still: one decode, then the same frame held for the whole slot.
-    args.push(
-      "-loop", "1", "-framerate", String(fps),
-      "-i", segment.source,
-      "-vf", `${fitChain(width, height)},fps=${fps},format=yuv420p`
-    );
+    args.push("-f", "lavfi", "-i", `color=c=black:s=${width}x${height}:r=${fps}`);
+    chain = "format=yuv420p";
+  } else if (isVideo) {
+    // An avatar is cut at the point the talking stops, so the picture doesn't
+    // sit on a closed mouth while the narration carries on underneath.
+    if (segment.sourceSeconds > 0) args.push("-t", segment.sourceSeconds.toFixed(3));
+    args.push("-i", segment.source);
+    chain = videoChain(width, height, fps, segment.frames, segment.stretch);
   } else {
     // `-framerate` matters: perspective animates on the frame counter, so the
     // stream has to arrive at the output rate or the move runs at the wrong
     // speed and the segment comes out the wrong length.
-    args.push(
-      "-loop", "1", "-framerate", String(fps),
-      "-i", segment.source,
-      "-vf",
-      zoomChain(
-        width, height, fps,
-        segment.frames,
-        segment.zoom,
-        settings.zoomAmount
-      )
-    );
+    args.push("-loop", "1", "-framerate", String(fps), "-i", segment.source);
+    chain = `${fitChain(width, height)},fps=${fps}`;
   }
+
+  // The move goes on after the source is fitted and at the output rate — which
+  // is also what lets a motion clip take one. It never did before: the video
+  // branch simply had no zoom in it, so the setting was accepted and ignored.
+  if (segment.source !== null) {
+    const amount =
+      segment.kind === "motion" ? settings.zoomAmountMotion : settings.zoomAmount;
+    const move = zoomChain(width, height, segment.frames, segment.zoom, amount);
+    if (move) chain = `${chain},${move}`;
+  }
+
+  // The look goes on last, over whatever the clip turned out to be — and only
+  // where the settings allow it, which is never on a talking face.
+  const film = segment.film ? filmChain(settings.film) : "";
+  args.push("-vf", [chain, film, "format=yuv420p"].filter(Boolean).join(","));
 
   args.push(
     "-frames:v", String(segment.frames),
@@ -306,7 +416,7 @@ export async function renderJob(job: Job, request: RenderRequest): Promise<void>
     // The last clip always runs to the end, so no audio is left over silent.
     clips[clips.length - 1].end = total;
 
-    const segments = planSegments(clips, settings.fps, job.dir);
+    const segments = planSegments(clips, settings.fps, job.dir, settings.maxStretch);
     if (segments.length === 0) {
       throw new Error("Every clip rounded away to nothing at this frame rate.");
     }

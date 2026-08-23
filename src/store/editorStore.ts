@@ -2,12 +2,15 @@
 
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
+import { analyseClip, classify, type Envelope } from "@/lib/editor/analyse";
 import { buildTimeline, clipZoom, type Timeline } from "@/lib/editor/timeline";
 import { parseTimestamp } from "@/lib/editor/timestamp";
 import { uploadAll } from "@/lib/editor/upload";
 import {
   DEFAULT_SETTINGS,
   MAX_IMAGES,
+  VIDEO_EXTENSIONS,
+  type ClipKind,
   type CreateJobResponse,
   type ErrorResponse,
   type JobStatus,
@@ -18,7 +21,11 @@ import {
   type ZoomDirection,
 } from "@/types/editor";
 
-/** An image the editor is holding, before and after it reaches the server. */
+/**
+ * A visual the editor is holding: a still, a generated motion clip, or a
+ * talking-avatar clip. They share a timeline and differ in what the renderer
+ * does with them.
+ */
 export interface EditorImage {
   id: string;
   file: File;
@@ -28,13 +35,36 @@ export interface EditorImage {
   /** Object URL for the preview canvas and the filmstrip. */
   url: string;
   excluded: boolean;
+
+  kind: ClipKind;
+  /** Null until a dropped video has been probed. */
+  duration: number | null;
+  /** Where the talking stops; equals `duration` when nothing is trimmed. */
+  speechEnd: number | null;
+  /** Where its audio actually matches the bed, which beats the filename. */
+  alignedStart: number | null;
+  /** How sure that match is. Under ~0.55 it isn't from this bed. */
+  confidence: number;
+  /** The clip's own loudness envelope, kept so it can be re-aligned. */
+  envelope: Envelope | null;
+  analysing: boolean;
 }
+
+const VIDEO_PATTERN = new RegExp(`\\.(${VIDEO_EXTENSIONS.join("|")})$`, "i");
+const IMAGE_PATTERN = /\.(png|jpe?g|webp|bmp|tiff?)$/i;
+
+export const isVideoFile = (file: File) =>
+  file.type.startsWith("video/") || VIDEO_PATTERN.test(file.name);
+export const isImageFile = (file: File) =>
+  file.type.startsWith("image/") || IMAGE_PATTERN.test(file.name);
 
 export interface AudioTrack {
   file: File;
   name: string;
   duration: number;
   url: string;
+  /** The bed's envelope — what talking clips are located against. */
+  envelope: Envelope | null;
 }
 
 export type ExportPhase = "idle" | "uploading" | "rendering" | "done" | "error";
@@ -74,6 +104,8 @@ interface EditorStore extends PersistedSettings {
   export: ExportState;
 
   addImages: (files: File[]) => void;
+  analyse: (id: string) => Promise<void>;
+  realign: () => void;
   removeImage: (id: string) => void;
   toggleImage: (id: string) => void;
   clearImages: () => void;
@@ -121,9 +153,8 @@ export const useEditorStore = create<EditorStore>()(
         const added: EditorImage[] = [];
 
         for (const file of files) {
-          if (!file.type.startsWith("image/") && !/\.(png|jpe?g|webp|bmp|tiff?)$/i.test(file.name)) {
-            continue;
-          }
+          const video = isVideoFile(file);
+          if (!video && !isImageFile(file)) continue;
           // Re-dropping the same folder shouldn't double every cue.
           if (seen.has(file.name)) continue;
           seen.add(file.name);
@@ -134,6 +165,17 @@ export const useEditorStore = create<EditorStore>()(
             seconds: parseTimestamp(file.name),
             url: URL.createObjectURL(file),
             excluded: false,
+            // A video's kind isn't known until it's been probed; until then it
+            // sits as a motion clip, which is the safe assumption — a still
+            // that turns out to be a talking clip gets effects for a moment,
+            // the other way round it would not.
+            kind: video ? "motion" : "still",
+            duration: null,
+            speechEnd: null,
+            alignedStart: null,
+            confidence: 0,
+            envelope: null,
+            analysing: video,
           });
         }
 
@@ -143,6 +185,77 @@ export const useEditorStore = create<EditorStore>()(
           URL.revokeObjectURL(image.url);
         }
         set((state) => ({ images: next, export: invalidate(state) }));
+
+        // Probing is async and per-file, so the timeline fills in as answers
+        // arrive rather than blocking on the slowest clip.
+        for (const image of next) {
+          if (image.analysing) void get().analyse(image.id);
+        }
+      },
+
+      analyse: async (id) => {
+        const image = get().images.find((entry) => entry.id === id);
+        if (!image) return;
+
+        try {
+          const facts = await analyseClip(image.file);
+          const bed = get().audio?.envelope ?? null;
+          const verdict = classify(facts, bed, image.seconds);
+
+          set((state) => ({
+            images: state.images.map((entry) =>
+              entry.id === id
+                ? {
+                    ...entry,
+                    kind: verdict.kind,
+                    duration: facts.duration,
+                    speechEnd: facts.speechEnd,
+                    alignedStart: verdict.kind === "avatar" ? verdict.start : null,
+                    confidence: verdict.confidence,
+                    envelope: facts.envelope,
+                    analysing: false,
+                  }
+                : entry
+            ),
+            export: invalidate(state),
+          }));
+        } catch {
+          set((state) => ({
+            images: state.images.map((entry) =>
+              entry.id === id ? { ...entry, analysing: false, kind: "motion" } : entry
+            ),
+          }));
+        }
+      },
+
+      /** Re-locates every talking clip — the bed changed underneath them. */
+      realign: () => {
+        const bed = get().audio?.envelope ?? null;
+        set((state) => ({
+          images: state.images.map((image) => {
+            if (image.kind === "still" || !image.envelope || image.duration === null) {
+              return image;
+            }
+            const verdict = classify(
+              {
+                duration: image.duration,
+                width: 0,
+                height: 0,
+                envelope: image.envelope,
+                speechEnd: image.speechEnd ?? image.duration,
+              },
+              bed,
+              image.seconds
+            );
+            return {
+              ...image,
+              kind: verdict.kind,
+              alignedStart: verdict.kind === "avatar" ? verdict.start : null,
+              confidence: verdict.confidence,
+            };
+          }),
+          export: invalidate(state),
+        }));
       },
 
       removeImage: (id) =>
@@ -169,13 +282,17 @@ export const useEditorStore = create<EditorStore>()(
           return { images: [], export: invalidate(state) };
         }),
 
-      setAudio: (track) =>
+      setAudio: (track) => {
         set((state) => {
           if (state.audio && state.audio.url !== track?.url) {
             URL.revokeObjectURL(state.audio.url);
           }
           return { audio: track, export: invalidate(state) };
-        }),
+        });
+        // Every talking clip's position is relative to the bed, so a new bed
+        // means every one of them has to find its place again.
+        get().realign();
+      },
 
       setSettings: (patch) =>
         set((state) => ({
@@ -218,7 +335,7 @@ export const useEditorStore = create<EditorStore>()(
           // Only the images that actually claimed a slot get uploaded — a
           // hundred-image folder with a few duds shouldn't send the duds.
           const used = new Set(
-            timeline.clips.map((clip) => clip.imageId).filter(Boolean) as string[]
+            timeline.clips.map((clip) => clip.sourceId).filter(Boolean) as string[]
           );
           const uploads: { key: string; kind: "image" | "audio"; file: File }[] =
             state.images
@@ -246,12 +363,31 @@ export const useEditorStore = create<EditorStore>()(
 
           if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
 
-          const clips: RenderClip[] = timeline.clips.map((clip, index) => ({
-            file: clip.imageId ? (stored.get(clip.imageId) ?? null) : null,
-            start: clip.start,
-            end: clip.end,
-            zoom: clip.imageId ? clipZoom(state.zoom, index) : "none",
-          }));
+          const byId = new Map(state.images.map((image) => [image.id, image]));
+
+          const clips: RenderClip[] = timeline.clips.map((clip, index) => {
+            const source = clip.sourceId ? byId.get(clip.sourceId) : undefined;
+            const avatar = clip.kind === "avatar";
+            const effects = avatar
+              ? false
+              : clip.kind === "motion"
+                ? state.settings.effectsOnMotion
+                : state.settings.effectsOnStills;
+
+            return {
+              file: clip.sourceId ? (stored.get(clip.sourceId) ?? null) : null,
+              kind: clip.kind,
+              start: clip.start,
+              end: clip.end,
+              // Neither the move nor the look goes near a talking face. The
+              // amount differs by kind and is resolved server-side.
+              zoom: clip.sourceId && !avatar && effects ? clipZoom(state.zoom, index) : "none",
+              film: Boolean(clip.sourceId) && effects && state.settings.film !== "off",
+              sourceSeconds: avatar
+                ? (source?.speechEnd ?? source?.duration ?? undefined)
+                : source?.duration ?? undefined,
+            };
+          });
 
           const request: RenderRequest = {
             clips,
@@ -333,6 +469,21 @@ export const useEditorStore = create<EditorStore>()(
         tailSeconds: state.tailSeconds,
         fileName: state.fileName,
       }),
+      /**
+       * `settings` is one stored object, and the default merge replaces it
+       * wholesale — so a browser holding settings from an older build comes
+       * back missing every field added since, and the first render that reads
+       * one throws. Layering the stored values over the current defaults means
+       * a new setting arrives with its default instead of as `undefined`.
+       */
+      merge: (persisted, current) => {
+        const saved = (persisted ?? {}) as Partial<PersistedSettings>;
+        return {
+          ...current,
+          ...saved,
+          settings: { ...DEFAULT_SETTINGS, ...(saved.settings ?? {}) },
+        };
+      },
     }
   )
 );
@@ -343,17 +494,27 @@ export function selectTimeline(state: {
   audio: AudioTrack | null;
   tailSeconds: number;
   leadIn: LeadIn;
+  settings: RenderSettings;
 }): Timeline {
   return buildTimeline({
     items: state.images.map((image) => ({
       id: image.id,
       label: image.label,
+      kind: image.kind,
       seconds: image.seconds,
+      alignedStart: image.alignedStart,
+      // Only a talking clip owns its length. A motion clip stretches to fit
+      // whatever gap it lands in, so it behaves like a still here.
+      fixedLength:
+        image.kind === "avatar"
+          ? Math.max(0.2, image.speechEnd ?? image.duration ?? 0)
+          : undefined,
       excluded: image.excluded,
     })),
     audioDuration: state.audio?.duration ?? 0,
     tailSeconds: state.tailSeconds,
     leadIn: state.leadIn,
+    minVisualSeconds: state.settings.minVisualSeconds,
   });
 }
 

@@ -265,7 +265,7 @@ export interface ShotImage {
  * sharing one recording cost one upload.
  */
 export interface ShotAudio {
-  /** Content hash of the uploaded source. */
+  /** Which loaded track this cut comes from. */
   sourceId: string;
   /** Original filename without its extension — half of the output's name. */
   name: string;
@@ -333,17 +333,12 @@ export interface VideoStartRequest {
   duration: number;
   resolution: string;
   aspectRatio: string;
-  /** Set for audio-driven models: the server cuts and uploads this itself. */
-  audio?: { sourceId: string; start: number; duration: number };
-}
-
-export interface AudioUploadResponse {
-  ok: true;
-  id: string;
-  bytes: number;
-  /** True once the whole file is on disk — `duration` is only set then. */
-  complete: boolean;
-  duration: number;
+  /**
+   * Set for audio-driven models: the already-cut voice clip. The bytes travel
+   * with the request rather than being fetched from a scratch directory,
+   * because a deployed copy has no disk that outlives a single request.
+   */
+  audio?: { base64: string; mimeType: string; seconds: number };
 }
 
 export interface ErrorResponse {

@@ -4,12 +4,15 @@ import { renderJob } from "@/server/editor/render";
 import {
   FPS_CHOICES,
   MAX_IMAGES,
+  type FilmLook,
   type ErrorResponse,
   type JobStatus,
   type RenderClip,
   type RenderRequest,
   type RenderSettings,
 } from "@/types/editor";
+
+const FILM_LOOKS: FilmLook[] = ["off", "subtle", "medium", "heavy"];
 
 function fail(error: string, status = 400) {
   return NextResponse.json<ErrorResponse>({ ok: false, error }, { status });
@@ -81,7 +84,20 @@ function validate(
       clip.zoom === "in" || clip.zoom === "out" || clip.zoom === "none"
         ? clip.zoom
         : "none";
-    clips.push({ file, start, end, zoom });
+    const kind =
+      clip.kind === "avatar" || clip.kind === "motion" ? clip.kind : "still";
+    const sourceSeconds = Number(clip.sourceSeconds);
+    clips.push({
+      file,
+      kind,
+      start,
+      end,
+      // Belt to the client's braces: a talking clip never zooms and never
+      // wears the film look, whatever the request claims.
+      zoom: kind === "avatar" ? "none" : zoom,
+      film: kind === "avatar" ? false : Boolean(clip.film),
+      sourceSeconds: Number.isFinite(sourceSeconds) && sourceSeconds > 0 ? sourceSeconds : undefined,
+    });
   }
 
   const raw = body.settings ?? ({} as RenderSettings);
@@ -96,8 +112,14 @@ function validate(
     fps,
     encoder: raw.encoder === "h264_videotoolbox" ? "h264_videotoolbox" : "libx264",
     zoomAmount: clamp(Number(raw.zoomAmount) || 0, 0, 0.5),
+    zoomAmountMotion: clamp(Number(raw.zoomAmountMotion) || 0, 0, 0.5),
     audioFadeOut: clamp(Number(raw.audioFadeOut) || 0, 0, 30),
     fileName: "output.mp4",
+    film: FILM_LOOKS.includes(raw.film as FilmLook) ? (raw.film as FilmLook) : "off",
+    effectsOnStills: raw.effectsOnStills !== false,
+    effectsOnMotion: raw.effectsOnMotion !== false,
+    minVisualSeconds: clamp(Number(raw.minVisualSeconds) || 2, 0.2, 30),
+    maxStretch: clamp(Number(raw.maxStretch) || 2.5, 1, 6),
   };
 
   const total = Number(body.total);

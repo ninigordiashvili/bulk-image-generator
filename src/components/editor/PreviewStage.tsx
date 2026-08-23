@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatTime } from "@/lib/editor/format";
+import { applyLook } from "@/lib/editor/filmPreview";
 import { BitmapCache } from "@/lib/editor/media";
 import { clipAt, clipZoom, type Timeline } from "@/lib/editor/timeline";
 import type { AudioTrack, EditorImage } from "@/store/editorStore";
-import type { ZoomDirection } from "@/types/editor";
+import type { FilmLook, ZoomDirection } from "@/types/editor";
 import { Filmstrip } from "./Filmstrip";
 
 /** The canvas the preview draws into. Fixed, and independent of export size —
@@ -22,6 +23,9 @@ interface Props {
   audio: AudioTrack | null;
   zoom: ZoomDirection;
   zoomAmount: number;
+  zoomAmountMotion: number;
+  film: FilmLook;
+  maxStretch: number;
   thumbnails: Map<string, string>;
   onToggleImage: (id: string) => void;
 }
@@ -32,12 +36,21 @@ export function PreviewStage({
   audio,
   zoom,
   zoomAmount,
+  zoomAmountMotion,
+  film,
+  maxStretch,
   thumbnails,
   onToggleImage,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * One `<video>` per clip, kept warm. Swapping a single element's `src` at
+   * each cut drops it back to "nothing decoded yet", and the canvas had
+   * nowhere to draw from — which is what put black frames between clips.
+   */
+  const videosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const readoutRef = useRef<HTMLSpanElement | null>(null);
 
   const [playing, setPlaying] = useState(false);
@@ -56,6 +69,49 @@ export function PreviewStage({
     for (const image of images) map.set(image.id, image);
     return map;
   }, [images]);
+
+  /** Elements are cheap to hold and expensive to warm up; a few is plenty. */
+  const VIDEO_POOL = 4;
+
+  const videoFor = useCallback((id: string, url: string): HTMLVideoElement => {
+    const pool = videosRef.current;
+    const existing = pool.get(id);
+    if (existing) {
+      // Re-inserting makes the map its own least-recently-used order.
+      pool.delete(id);
+      pool.set(id, existing);
+      return existing;
+    }
+
+    const element = document.createElement("video");
+    element.src = url;
+    element.muted = true;
+    element.playsInline = true;
+    element.preload = "auto";
+    element.load();
+    pool.set(id, element);
+
+    while (pool.size > VIDEO_POOL) {
+      const oldest = pool.keys().next();
+      if (oldest.done) break;
+      const stale = pool.get(oldest.value);
+      stale?.pause();
+      stale?.removeAttribute("src");
+      pool.delete(oldest.value);
+    }
+    return element;
+  }, []);
+
+  useEffect(() => {
+    const pool = videosRef.current;
+    return () => {
+      for (const element of pool.values()) {
+        element.pause();
+        element.removeAttribute("src");
+      }
+      pool.clear();
+    };
+  }, []);
 
   const cacheRef = useRef<BitmapCache | null>(null);
   useEffect(() => {
@@ -170,23 +226,73 @@ export function PreviewStage({
 
       const index = clipAt(clips, time);
       const clip = index >= 0 ? clips[index] : null;
+      const source = clip?.sourceId ? byId.get(clip.sourceId) : null;
 
-      context.fillStyle = "#000000";
-      context.fillRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+      // What to paint, decided before anything is cleared. Leaving the last
+      // good frame up while a clip warms is the whole point: clearing first and
+      // finding nothing ready is what produced black between visuals.
+      let paint: (() => void) | null = null;
 
-      if (clip?.imageId) {
-        const image = byId.get(clip.imageId);
-        if (image) {
-          cache.request(clip.imageId, image.file);
-          const bitmap = cache.get(clip.imageId);
-          if (bitmap) drawZoomed(context, bitmap, clip.start, clip.end, time, index);
+      if (clip && source && clip.kind !== "still") {
+        const element = videoFor(clip.sourceId!, source.url);
+        const slot = clip.end - clip.start;
+        const footage = source.duration ?? slot;
+        // Motion clips are slowed to fill their slot, so preview time runs
+        // slower than wall time by the same factor the render will use.
+        const stretch =
+          clip.kind === "motion" && footage > 0
+            ? Math.min(maxStretch, Math.max(1, slot / footage))
+            : 1;
+        const want = Math.max(0, Math.min(footage, (time - clip.start) / stretch));
+
+        if (playingRef.current) {
+          if (element.paused) void element.play().catch(() => {});
+          // Only correct real drift; nudging every frame would stutter.
+          if (Math.abs(element.currentTime - want) > 0.2) element.currentTime = want;
+          element.playbackRate = Math.max(0.0625, Math.min(4, 1 / stretch));
+        } else {
+          if (!element.paused) element.pause();
+          if (Math.abs(element.currentTime - want) > 0.02) element.currentTime = want;
         }
-        // Warm the next couple so a cut doesn't land on an empty cache.
-        for (let ahead = 1; ahead <= PREFETCH; ahead++) {
-          const upcoming = clips[index + ahead];
-          const source = upcoming?.imageId ? byId.get(upcoming.imageId) : null;
-          if (upcoming?.imageId && source) cache.request(upcoming.imageId, source.file);
+
+        if (element.readyState >= 2) {
+          const scale = zoomScale(clip, index, time);
+          paint = () =>
+            drawFitted(context, element, element.videoWidth, element.videoHeight, scale);
         }
+
+        // Pause every other clip's element, or four videos play at once.
+        for (const [id, other] of videosRef.current) {
+          if (id !== clip.sourceId && !other.paused) other.pause();
+        }
+      } else if (clip?.sourceId && source) {
+        cache.request(clip.sourceId, source.file);
+        const bitmap = cache.get(clip.sourceId);
+        if (bitmap) {
+          paint = () => drawZoomed(context, bitmap, clip, time, index);
+        }
+      } else {
+        // A genuine gap — a lead-in. Black is the intent here, not a stall.
+        paint = () => {};
+      }
+
+      // Warm what's coming: the next stills decoded, the next clips buffered.
+      for (let ahead = 1; ahead <= PREFETCH; ahead++) {
+        const upcoming = clips[index + ahead];
+        const next = upcoming?.sourceId ? byId.get(upcoming.sourceId) : null;
+        if (!upcoming?.sourceId || !next) continue;
+        if (upcoming.kind === "still") cache.request(upcoming.sourceId, next.file);
+        else videoFor(upcoming.sourceId, next.url);
+      }
+
+      if (paint) {
+        context.filter = "none";
+        context.globalAlpha = 1;
+        context.fillStyle = "#000000";
+        context.fillRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+        // Only stills and motion clips wear the look, exactly as they do in
+        // the render — a talking face takes neither grain nor zoom.
+        applyLook(context, clip && clip.kind !== "avatar" ? film : "off", time, paint);
       }
 
       if (playheadRef.current && total > 0) {
@@ -205,33 +311,38 @@ export function PreviewStage({
       }
     };
 
-    const drawZoomed = (
-      ctx: CanvasRenderingContext2D,
-      bitmap: ImageBitmap,
-      start: number,
-      end: number,
-      time: number,
-      index: number
-    ) => {
+    /**
+     * How much bigger the picture is at `time`. Stills and motion clips take
+     * their own amounts; a talking face never moves.
+     */
+    const zoomScale = (clip: (typeof clips)[number], index: number, time: number) => {
+      if (clip.kind === "avatar") return 1;
+      const amount = clip.kind === "motion" ? zoomAmountMotion : zoomAmount;
+      if (amount <= 0) return 1;
       const direction = clipZoom(zoom, index);
-      const span = Math.max(0.0001, end - start);
-      const progress = Math.min(1, Math.max(0, (time - start) / span));
-      const scale =
-        direction === "in"
-          ? 1 + zoomAmount * progress
-          : direction === "out"
-            ? 1 + zoomAmount * (1 - progress)
-            : 1;
+      if (direction === "none") return 1;
+      const span = Math.max(0.0001, clip.end - clip.start);
+      const progress = Math.min(1, Math.max(0, (time - clip.start) / span));
+      return direction === "in" ? 1 + amount * progress : 1 + amount * (1 - progress);
+    };
 
-      // ffmpeg letterboxes the image into the frame and then magnifies the
-      // whole frame about its centre, so any bars grow with it. Scaling the
-      // fitted image about the centre of the canvas is the same operation.
+    const drawFitted = (
+      ctx: CanvasRenderingContext2D,
+      source: CanvasImageSource,
+      naturalWidth: number,
+      naturalHeight: number,
+      scale: number
+    ) => {
+      if (!naturalWidth || !naturalHeight) return;
+      // ffmpeg letterboxes into the frame and then magnifies the whole frame
+      // about its centre, so any bars grow with it. Scaling the fitted picture
+      // about the centre of the canvas is the same operation.
       const fit =
-        Math.min(PREVIEW_WIDTH / bitmap.width, PREVIEW_HEIGHT / bitmap.height) * scale;
-      const width = bitmap.width * fit;
-      const height = bitmap.height * fit;
+        Math.min(PREVIEW_WIDTH / naturalWidth, PREVIEW_HEIGHT / naturalHeight) * scale;
+      const width = naturalWidth * fit;
+      const height = naturalHeight * fit;
       ctx.drawImage(
-        bitmap,
+        source,
         (PREVIEW_WIDTH - width) / 2,
         (PREVIEW_HEIGHT - height) / 2,
         width,
@@ -239,9 +350,22 @@ export function PreviewStage({
       );
     };
 
+    const drawZoomed = (
+      ctx: CanvasRenderingContext2D,
+      bitmap: ImageBitmap,
+      clip: (typeof clips)[number],
+      time: number,
+      index: number
+    ) => {
+      drawFitted(ctx, bitmap, bitmap.width, bitmap.height, zoomScale(clip, index, time));
+    };
+
     frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
-  }, [byId, clips, currentTime, total, zoom, zoomAmount]);
+  }, [
+    byId, clips, currentTime, total,
+    zoom, zoomAmount, zoomAmountMotion, film, maxStretch, videoFor,
+  ]);
 
   const onScrub = (event: React.MouseEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -291,7 +415,7 @@ export function PreviewStage({
             <div
               key={clip.index}
               className={`absolute top-0 bottom-0 border-l ${
-                clip.imageId ? "border-accent/40" : "border-line bg-black/40"
+                clip.sourceId ? "border-accent/40" : "border-line bg-black/40"
               }`}
               style={{
                 left: `${(clip.start / total) * 100}%`,

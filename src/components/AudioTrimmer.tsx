@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AudioSource } from "@/lib/audioSource";
+import type { AudioSource } from "@/store/videoStore";
 import { formatTime } from "@/lib/editor/format";
 import { secondsToCue } from "@/lib/editor/timestamp";
 
