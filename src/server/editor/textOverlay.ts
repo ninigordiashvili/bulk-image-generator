@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { displayText, styleOf } from "@/lib/editor/textStyles";
 import type { TextMoment } from "@/types/editor";
 
 /**
@@ -24,31 +25,22 @@ const FADE_OUT = 0.45;
 const TRAVEL = 0.55;
 
 /**
- * A font to draw with.
+ * A font file for a style.
  *
  * ffmpeg can fall back on fontconfig, but the bundled build has no fontconfig
  * file, so what it picks is whatever it finds — different on each machine and
  * silently different between a preview and an export. Naming a file makes the
- * result the same everywhere the file exists.
+ * result the same everywhere the file exists; the lists in `textStyles` cover
+ * macOS, Windows and a typical Linux install.
  */
-const FONT_CANDIDATES = [
-  "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-  "/System/Library/Fonts/Supplemental/Arial.ttf",
-  "/System/Library/Fonts/HelveticaNeue.ttc",
-  "C:/Windows/Fonts/arialbd.ttf",
-  "C:/Windows/Fonts/segoeuib.ttf",
-  "C:/Windows/Fonts/arial.ttf",
-  "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-  "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-];
+const resolved = new Map<string, string | null>();
 
-let resolvedFont: string | null | undefined;
-
-export function fontFile(): string | null {
-  if (resolvedFont === undefined) {
-    resolvedFont = FONT_CANDIDATES.find((path) => existsSync(path)) ?? null;
+export function fontFileFor(candidates: string[]): string | null {
+  const key = candidates.join("|");
+  if (!resolved.has(key)) {
+    resolved.set(key, candidates.find((path) => existsSync(path)) ?? null);
   }
-  return resolvedFont;
+  return resolved.get(key) ?? null;
 }
 
 /**
@@ -135,23 +127,29 @@ export function momentChain(
   const alpha =
     `min(1,min((t-${fixed(start)})/${FADE_IN},(${fixed(end)}-t)/${FADE_OUT}))`;
 
-  const font = fontFile();
+  const look = styleOf(moment.style);
+  const font = fontFileFor(look.files);
   // Sizes are whole pixels, worked out from the output height here: drawtext
   // takes expressions for x, y and alpha, but `fontsize`, `borderw` and
   // `shadowy` are plain integers and reject one.
   const fontSize = Math.max(8, Math.round(height * moment.size));
-  const border = Math.max(1, Math.round(height / 360));
-  const shadow = Math.max(1, Math.round(height / 540));
+  const border = look.rim > 0 ? Math.max(1, Math.round(height * look.rim)) : 0;
+  const shadow = look.shadow > 0 ? Math.max(1, Math.round(height * look.shadow)) : 0;
+
   parts.push(
     [
       "drawtext=",
       font ? `fontfile='${font}':` : "",
-      `text='${escapeDrawText(moment.text)}'`,
+      `text='${escapeDrawText(displayText(moment.text, moment.style))}'`,
       `:fontsize=${fontSize}`,
-      ":fontcolor=white",
-      // A dark rim keeps it legible over a bright frame without a solid box.
-      `:borderw=${border}:bordercolor=black@0.75`,
-      `:shadowx=0:shadowy=${shadow}:shadowcolor=black@0.5`,
+      `:fontcolor=0x${look.colour}`,
+      // A dark rim keeps it legible over a bright frame without a solid box —
+      // the styles that use a box instead ask for no rim.
+      border > 0 ? `:borderw=${border}:bordercolor=black@${look.rimAlpha}` : "",
+      shadow > 0 ? `:shadowx=0:shadowy=${shadow}:shadowcolor=black@${look.shadowAlpha}` : "",
+      look.box
+        ? `:box=1:boxcolor=black@${look.boxAlpha}:boxborderw=${Math.round(fontSize * 0.35)}`
+        : "",
       ":x=(w-text_w)/2",
       `:y='${y}'`,
       `:alpha='${alpha}'`,

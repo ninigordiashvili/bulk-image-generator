@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { formatTime } from "@/lib/editor/format";
 import { parseClock } from "@/lib/editor/timestamp";
 import { useEditorStore } from "@/store/editorStore";
+import { STYLE_ORDER, TEXT_STYLES, styleOf } from "@/lib/editor/textStyles";
 import { MAX_MOMENTS, type MomentAnimation, type TextMoment } from "@/types/editor";
 
 const ANIMATIONS: { value: MomentAnimation; label: string }[] = [
@@ -185,6 +186,45 @@ function MomentRow({
         >
           ✕
         </button>
+      </div>
+
+      <div className="space-y-1">
+        <span className="text-[11px] text-muted">Style</span>
+        <div className="grid grid-cols-5 gap-1">
+          {STYLE_ORDER.map((name) => {
+            const spec = TEXT_STYLES[name];
+            const active = (moment.style ?? "modern") === name;
+            return (
+              <button
+                key={name}
+                type="button"
+                disabled={disabled}
+                title={spec.hint}
+                onClick={() => onChange({ style: name })}
+                className={`rounded-md border px-1 py-1.5 text-[10px] leading-tight transition ${
+                  active
+                    ? "border-accent bg-accent/15 text-foreground"
+                    : "border-line bg-surface-2 text-muted hover:text-foreground"
+                }`}
+              >
+                {/* Each button is set in its own face, so the choice is made by
+                    looking rather than by reading the names. */}
+                <span
+                  className="block truncate"
+                  style={{
+                    fontFamily: spec.css,
+                    fontWeight: spec.weight,
+                    textTransform: spec.uppercase ? "uppercase" : "none",
+                  }}
+                >
+                  Ag
+                </span>
+                <span className="mt-0.5 block truncate opacity-70">{spec.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[10px] text-muted">{styleOf(moment.style).hint}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-2">

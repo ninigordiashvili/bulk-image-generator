@@ -59,6 +59,23 @@ export function PreviewStage({
   const [playing, setPlaying] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
 
+  /**
+   * The moments live in a ref for the same reason the clock does, but the other
+   * way round: the draw loop has to see the current list without being listed
+   * as a dependency. Putting `moments` in the dependency array would tear down
+   * and rebuild the loop on every keystroke in a text box — and leaving it out
+   * without this ref is what made the text invisible, because the loop closed
+   * over the empty array it was built with and never saw another one.
+   */
+  const momentsRef = useRef(moments);
+  // Written in an effect, not during render: assigning a ref while rendering is
+  // unsafe under concurrent rendering, and the rule that forbids it is right.
+  // A commit lands before the next animation frame, so the loop is never more
+  // than one frame behind the list.
+  useEffect(() => {
+    momentsRef.current = moments;
+  }, [moments]);
+
   // The clock lives in refs: it advances sixty times a second, and putting it
   // in state would re-render the whole editor at that rate.
   const timeRef = useRef(0);
@@ -298,7 +315,7 @@ export function PreviewStage({
         applyLook(context, clip && clip.kind !== "avatar" ? film : "off", time, paint);
         // Text goes on above the look, as it does in the render: grain belongs
         // to the picture, and a caption is not part of the picture.
-        drawMoments(context, moments, time, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+        drawMoments(context, momentsRef.current, time, PREVIEW_WIDTH, PREVIEW_HEIGHT);
       }
 
       if (playheadRef.current && total > 0) {
@@ -383,13 +400,17 @@ export function PreviewStage({
 
   return (
     <section className="panel space-y-3">
+      {/* Capped against the viewport, not just the column: the panel is sticky,
+          and one taller than the screen would pin its top and leave the
+          transport controls permanently below the fold. `object-contain` means
+          the cap letterboxes rather than stretching the picture. */}
       <div className="relative overflow-hidden rounded-lg bg-black">
         <canvas
           ref={canvasRef}
           width={PREVIEW_WIDTH}
           height={PREVIEW_HEIGHT}
           onClick={toggle}
-          className="block aspect-video w-full cursor-pointer"
+          className="block aspect-video max-h-[58vh] w-full cursor-pointer object-contain"
         />
         {empty && (
           <div className="absolute inset-0 grid place-items-center px-6 text-center">

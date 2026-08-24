@@ -92,8 +92,13 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(320px,1fr)]">
-        <div className="space-y-4">
+      {/* The settings column is far taller than the preview, and every setting
+          in it changes what the preview shows — so the preview follows you down
+          it rather than scrolling away at the top. `items-start` keeps the grid
+          from stretching the column, which is what makes the sticky child's
+          containing block the full row height. */}
+      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(320px,1fr)]">
+        <div className="space-y-4 lg:sticky lg:top-4">
           <PreviewStage
             timeline={timeline}
             images={images}

@@ -68,7 +68,6 @@ function VideoLightbox({
       className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-black/85 p-6"
       onClick={onClose}
     >
-      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
       <video
         src={url}
         controls
@@ -111,8 +110,7 @@ function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-surface-2">
       <div className="relative">
-        {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-        <video
+          <video
           src={url}
           poster={`data:${video.posterMimeType};base64,${video.posterBase64}`}
           controls

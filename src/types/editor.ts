@@ -188,6 +188,8 @@ export const MAX_IMAGES = 600;
 /** Video containers the editor will take alongside stills. */
 export const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "webm"] as const;
 
+import type { MomentStyle } from "@/lib/editor/textStyles";
+
 /** How a text moment arrives on screen. */
 export type MomentAnimation = "rise" | "fade" | "drop";
 
@@ -203,6 +205,8 @@ export interface TextMoment {
   start: number;
   duration: number;
   animation: MomentAnimation;
+  /** Which look it wears. Absent on moments saved before styles existed. */
+  style?: MomentStyle;
   /** How much the picture behind is dimmed, 0 to 0.8. */
   darken: number;
   /** Text height as a fraction of frame height, so it scales with the export. */
@@ -212,6 +216,7 @@ export interface TextMoment {
 export const MOMENT_DEFAULTS = {
   duration: 4,
   animation: "rise" as MomentAnimation,
+  style: "modern" as MomentStyle,
   darken: 0.35,
   size: 0.12,
 };

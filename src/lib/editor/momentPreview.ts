@@ -1,3 +1,4 @@
+import { displayText, styleOf } from "./textStyles";
 import type { TextMoment } from "@/types/editor";
 
 /**
@@ -57,9 +58,11 @@ export function drawMoments(
       context.fillRect(0, 0, width, height);
     }
 
+    const look = styleOf(moment.style);
+    const words = displayText(moment.text, moment.style);
     const size = Math.max(8, height * moment.size);
     context.globalAlpha = fade;
-    context.font = `700 ${size}px "Helvetica Neue", Arial, sans-serif`;
+    context.font = `${look.weight} ${size}px ${look.css}`;
     context.textAlign = "center";
     context.textBaseline = "middle";
 
@@ -70,13 +73,38 @@ export function drawMoments(
         ? centre
         : height * from + (centre - height * from) * smoothstep(clamp01((time - moment.start) / TRAVEL));
 
-    // Rim then fill, the same order drawtext composites them.
-    context.lineWidth = Math.max(1, height / 360) * 2;
-    context.strokeStyle = "rgba(0,0,0,0.75)";
-    context.lineJoin = "round";
-    context.strokeText(moment.text, width / 2, y);
-    context.fillStyle = "#ffffff";
-    context.fillText(moment.text, width / 2, y);
+    // The bar first, sized to the words, so the rest lands on top of it.
+    if (look.box) {
+      const pad = size * 0.35;
+      const measured = context.measureText(words).width;
+      context.fillStyle = `rgba(0,0,0,${look.boxAlpha})`;
+      context.fillRect(
+        width / 2 - measured / 2 - pad,
+        y - size / 2 - pad,
+        measured + pad * 2,
+        size + pad * 2
+      );
+    }
+
+    // Shadow, then rim, then fill — the order drawtext composites them.
+    if (look.shadow > 0) {
+      context.shadowColor = `rgba(0,0,0,${look.shadowAlpha})`;
+      context.shadowOffsetY = Math.max(1, height * look.shadow);
+      context.shadowBlur = size * 0.06;
+    }
+    if (look.rim > 0) {
+      // Canvas strokes centred on the path, so half the width lands inside the
+      // glyph; doubling matches drawtext's outward-only border.
+      context.lineWidth = Math.max(1, height * look.rim) * 2;
+      context.strokeStyle = `rgba(0,0,0,${look.rimAlpha})`;
+      context.lineJoin = "round";
+      context.strokeText(words, width / 2, y);
+    }
+    context.shadowColor = "transparent";
+    context.shadowOffsetY = 0;
+    context.shadowBlur = 0;
+    context.fillStyle = `#${look.colour}`;
+    context.fillText(words, width / 2, y);
 
     context.restore();
   }
