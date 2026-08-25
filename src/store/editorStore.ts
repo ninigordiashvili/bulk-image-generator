@@ -34,20 +34,6 @@ import {
  * talking-avatar clip. They share a timeline and differ in what the renderer
  * does with them.
  */
-/**
- * What a hand did to one visual's place on the timeline.
- *
- * Kept beside the images rather than on them, and keyed by id, so that
- * re-dropping a folder or re-running the alignment leaves the edits alone —
- * and so that clearing them is one operation rather than a walk.
- */
-export interface ClipEdit {
-  /** Where it starts, overriding the filename cue. */
-  start?: number;
-  /** How long it holds. A still with one owns its length like an avatar does. */
-  length?: number;
-}
-
 export interface EditorImage {
   id: string;
   file: File;
@@ -125,8 +111,6 @@ interface PersistedSettings {
    */
   transcript: string;
   moments: TextMoment[];
-  /** Hand edits to the timeline, keyed by visual id. */
-  edits: Record<string, ClipEdit>;
 }
 
 interface EditorStore extends PersistedSettings {
@@ -151,15 +135,6 @@ interface EditorStore extends PersistedSettings {
   setTailSeconds: (seconds: number) => void;
   setFileName: (name: string) => void;
 
-  /** Move one visual, in absolute seconds. */
-  setClipStart: (id: string, start: number) => void;
-  /** Give one visual an explicit length, or take it away with null. */
-  setClipLength: (id: string, length: number | null) => void;
-  /** Hand this visual back to its filename. */
-  resetClip: (id: string) => void;
-  /** Hand every visual back to its filename. */
-  resetAllClips: () => void;
-
   setTranscript: (text: string) => void;
   addMoment: (candidate: MomentCandidate) => void;
   addBlankMoment: (start: number) => void;
@@ -171,15 +146,6 @@ interface EditorStore extends PersistedSettings {
   cancelExport: () => void;
   dismissExport: () => void;
 }
-
-/** Milliseconds are the finest anything here needs; past that it is noise. */
-const round3 = (value: number) => Math.round(value * 1000) / 1000;
-
-/**
- * The shortest a clip may be dragged. Two frames at 30fps — below this a clip
- * is a flash, and the handle becomes impossible to grab back.
- */
-export const MIN_CLIP_SECONDS = 0.2;
 
 let exportAbort: AbortController | null = null;
 
@@ -203,7 +169,6 @@ export const useEditorStore = create<EditorStore>()(
       transcript: "",
       candidates: [],
       moments: [],
-      edits: {},
 
       settings: DEFAULT_SETTINGS,
       zoom: "in",
@@ -369,37 +334,6 @@ export const useEditorStore = create<EditorStore>()(
         set((state) => ({ tailSeconds, export: invalidate(state) })),
       setFileName: (fileName) => set({ fileName }),
 
-      setClipStart: (id, start) =>
-        set((state) => ({
-          edits: {
-            ...state.edits,
-            [id]: { ...state.edits[id], start: Math.max(0, round3(start)) },
-          },
-          export: invalidate(state),
-        })),
-
-      setClipLength: (id, length) =>
-        set((state) => {
-          const next = { ...state.edits[id] };
-          if (length === null) delete next.length;
-          else next.length = Math.max(MIN_CLIP_SECONDS, round3(length));
-          // An entry with nothing left in it is an entry that should not exist,
-          // or "reset" would leave a clip looking edited forever.
-          const edits = { ...state.edits };
-          if (next.start === undefined && next.length === undefined) delete edits[id];
-          else edits[id] = next;
-          return { edits, export: invalidate(state) };
-        }),
-
-      resetClip: (id) =>
-        set((state) => {
-          const edits = { ...state.edits };
-          delete edits[id];
-          return { edits, export: invalidate(state) };
-        }),
-
-      resetAllClips: () => set((state) => ({ edits: {}, export: invalidate(state) })),
-
       setTranscript: (text) =>
         set((state) => ({
           transcript: text,
@@ -538,10 +472,6 @@ export const useEditorStore = create<EditorStore>()(
               sourceSeconds: avatar
                 ? (source?.speechEnd ?? source?.duration ?? undefined)
                 : source?.duration ?? undefined,
-              // A length someone dragged out is allowed to slow the clip past
-              // the automatic cap; see HAND_STRETCH_LIMIT in the renderer.
-              stretchByHand:
-                clip.sourceId != null && state.edits[clip.sourceId]?.length != null,
             };
           });
 
@@ -627,7 +557,6 @@ export const useEditorStore = create<EditorStore>()(
         fileName: state.fileName,
         transcript: state.transcript,
         moments: state.moments,
-        edits: state.edits,
       }),
       /**
        * `settings` is one stored object, and the default merge replaces it
@@ -644,7 +573,6 @@ export const useEditorStore = create<EditorStore>()(
           ...saved,
           settings: { ...DEFAULT_SETTINGS, ...(saved.settings ?? {}) },
           moments: saved.moments ?? [],
-          edits: saved.edits ?? {},
           transcript,
           // Derived from the transcript, so it is rebuilt rather than stored —
           // otherwise a change to the detector would never reach saved work.
@@ -662,7 +590,6 @@ export function selectTimeline(state: {
   tailSeconds: number;
   leadIn: LeadIn;
   settings: RenderSettings;
-  edits: Record<string, ClipEdit>;
 }): Timeline {
   return buildTimeline({
     items: state.images.map((image) => ({
@@ -671,8 +598,6 @@ export function selectTimeline(state: {
       kind: image.kind,
       seconds: image.seconds,
       alignedStart: image.alignedStart,
-      overrideStart: state.edits[image.id]?.start ?? null,
-      overrideLength: state.edits[image.id]?.length ?? null,
       // Only a talking clip owns its length. A motion clip stretches to fit
       // whatever gap it lands in, so it behaves like a still here.
       fixedLength:

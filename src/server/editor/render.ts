@@ -53,13 +53,6 @@ export interface PlannedSegment {
  * the hundredth image a 10-minute video would have drifted several frames off
  * the narration.
  */
-/**
- * How far a hand-set length may slow a clip. Well past the automatic cap, but
- * not unbounded: beyond this the interpolator is inventing more frames than it
- * was given and the result is soup whatever anyone intended.
- */
-export const HAND_STRETCH_LIMIT = 8;
-
 export function planSegments(
   clips: RenderClip[],
   fps: number,
@@ -77,14 +70,9 @@ export function planSegments(
     const sourceSeconds = clip.sourceSeconds ?? 0;
     // A motion clip is slowed to fill its slot. An avatar never is: its length
     // is its speech, and stretching it would put the lips out of time.
-    //
-    // The cap is on the automatic fill. Someone who dragged this clip to a
-    // length is looking at the result and gets what they asked for, up to a
-    // ceiling where optical flow stops producing anything watchable at all.
-    const ceiling = clip.stretchByHand ? HAND_STRETCH_LIMIT : maxStretch;
     const stretch =
       clip.kind === "motion" && sourceSeconds > 0
-        ? Math.min(ceiling, Math.max(1, slotSeconds / sourceSeconds))
+        ? Math.min(maxStretch, Math.max(1, slotSeconds / sourceSeconds))
         : 1;
 
     segments.push({

@@ -87,14 +87,6 @@ export interface RenderClip {
   sourceSeconds?: number;
   /** Whether the film look applies — resolved from the settings and the kind. */
   film: boolean;
-  /**
-   * Set when the length was chosen by hand rather than derived from cues.
-   *
-   * A deliberate stretch is allowed past `maxStretch`, which exists to stop the
-   * *automatic* fill inventing nonsense — not to overrule someone who dragged a
-   * four-second clip out to twelve and can see the result.
-   */
-  stretchByHand?: boolean;
 }
 
 /** How heavy the old-film treatment is. */
