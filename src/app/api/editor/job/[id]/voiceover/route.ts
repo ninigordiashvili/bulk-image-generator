@@ -53,7 +53,13 @@ export async function POST(
   const options = {
     maxGap,
     keepGap,
-    thresholdDb: clamp(Number(body.thresholdDb) || -35, -60, -10),
+    // Measured from the recording unless a number was sent deliberately. The
+    // old default of -35 was the bug: a take whose room tone sat above it had
+    // none of its pauses found at all.
+    thresholdDb:
+      body.thresholdDb === undefined || body.thresholdDb === null
+        ? null
+        : clamp(Number(body.thresholdDb), -80, -10),
     // Nor can the run-up be longer than the pause it has to fit inside.
     leadIn: clamp(
       body.leadIn === undefined ? 0.2 : Number(body.leadIn) || 0,

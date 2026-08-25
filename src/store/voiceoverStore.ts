@@ -120,7 +120,6 @@ export const useVoiceoverStore = create<VoiceoverState>()(
             maxGap,
             keepGap,
             leadIn,
-            thresholdDb: -35,
           })) as { ok: true; report: PaceReport } | ErrorResponse;
           if (!joined.ok) throw new Error(joined.error);
 

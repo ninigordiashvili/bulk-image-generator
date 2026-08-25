@@ -142,6 +142,10 @@ export interface UploadResponse {
 export interface PaceReport {
   stored: string;
   storedMp3: string;
+  noiseFloorDb: number;
+  speechDb: number;
+  thresholdDb: number;
+  uncertain: boolean;
   duration: number;
   originalDuration: number;
   tightened: number;

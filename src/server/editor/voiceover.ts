@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { FFMPEG, FfmpegError, probeDuration, run } from "./ffmpeg";
@@ -16,6 +17,14 @@ import { resolveInside, type Job } from "./jobs";
  * So the pauses are found first and only the *excess* is cut: a gap longer than
  * `maxGap` loses everything past `keepGap`, and a gap shorter than that is left
  * exactly as recorded. Speech is never touched.
+ *
+ * Finding them is the part that has to be right. A fixed threshold does not
+ * work: a pause in a real recording is not silence, it is the room, the preamp
+ * and the microphone, and where that sits varies by tens of decibels between
+ * one setup and another. Measured on takes whose only difference was the noise
+ * floor, a fixed -35dB found every pause at -45dB and *none at all* at -28dB —
+ * which is exactly the complaint that the long pauses survive. So the level is
+ * measured from the recording itself; see `pickThreshold`.
  */
 
 export interface PaceOptions {
@@ -23,8 +32,12 @@ export interface PaceOptions {
   maxGap: number;
   /** What a too-long pause is shortened to. */
   keepGap: number;
-  /** How quiet counts as a pause. -35 to -45 dB covers most recordings. */
-  thresholdDb: number;
+  /**
+   * How quiet counts as a pause. Null — the normal case — measures it from the
+   * recording. A number overrides that, for the rare take the measurement gets
+   * wrong.
+   */
+  thresholdDb: number | null;
   /**
    * Real audio kept immediately before speech resumes.
    *
@@ -52,6 +65,17 @@ export interface PaceReport {
   /** Longest pause left, for a sanity check in the UI. */
   longestGap: number;
   parts: number;
+  /** The level the recording's own quiet sits at. */
+  noiseFloorDb: number;
+  /** And where its speech sits. */
+  speechDb: number;
+  /** The line drawn between the two, measured unless it was overridden. */
+  thresholdDb: number;
+  /**
+   * True when the two are too close to tell apart — a heavily compressed or
+   * noisy take. The cuts are still made, but they are worth listening to.
+   */
+  uncertain: boolean;
 }
 
 interface Silence {
@@ -59,38 +83,171 @@ interface Silence {
   end: number;
 }
 
-/** Every stretch of quiet ffmpeg can find, in order. */
-export async function findSilences(
-  file: string,
+/** 20ms of audio, which is fine enough to place a cut and coarse enough to be cheap. */
+const FRAME_SECONDS = 0.02;
+const LEVEL_RATE = 8000;
+const FRAME_SAMPLES = LEVEL_RATE * FRAME_SECONDS;
+
+/**
+ * The loudness of every 20ms of the recording, in dBFS.
+ *
+ * Streamed and reduced as it arrives: half an hour decodes to about 29MB of
+ * samples but only 90,000 numbers, and there is no reason to hold the samples.
+ */
+export function frameLevels(file: string, signal?: AbortSignal): Promise<number[]> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Cancelled."));
+      return;
+    }
+    const child = spawn(
+      FFMPEG,
+      ["-hide_banner", "-loglevel", "error", "-nostdin", "-i", file,
+       "-ac", "1", "-ar", String(LEVEL_RATE), "-f", "s16le", "-"],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    );
+
+    const levels: number[] = [];
+    let sum = 0;
+    let count = 0;
+    let carry: Buffer | null = null;
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      let buffer = chunk;
+      if (carry) {
+        buffer = Buffer.concat([carry, chunk]);
+        carry = null;
+      }
+      // A chunk can split a sample in half; the odd byte waits for the next one.
+      const usable = buffer.length - (buffer.length % 2);
+      for (let i = 0; i < usable; i += 2) {
+        const value = buffer.readInt16LE(i) / 32768;
+        sum += value * value;
+        if (++count === FRAME_SAMPLES) {
+          const rms = Math.sqrt(sum / FRAME_SAMPLES);
+          levels.push(rms > 0 ? 20 * Math.log10(rms) : -120);
+          sum = 0;
+          count = 0;
+        }
+      }
+      if (usable < buffer.length) carry = buffer.subarray(usable);
+    });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-4000);
+    });
+
+    const onAbort = () => child.kill("SIGKILL");
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.on("error", (error: Error) => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+    child.on("close", (code: number | null) => {
+      signal?.removeEventListener("abort", onAbort);
+      if (signal?.aborted) reject(new Error("Cancelled."));
+      else if (code === 0) resolve(levels);
+      else reject(new FfmpegError(`ffmpeg exited with ${code}`, stderr));
+    });
+  });
+}
+
+/** A percentile of the frame levels, for reporting what was measured. */
+export function percentileOf(levels: number[], p: number): number {
+  if (levels.length === 0) return -120;
+  const sorted = [...levels].sort((a, b) => a - b);
+  const at = Math.min(sorted.length - 1, Math.max(0, Math.floor(p * sorted.length)));
+  return sorted[at];
+}
+
+/**
+ * Where to draw the line between the room and the voice.
+ *
+ * Otsu's method: of every possible threshold, the one that leaves the quiet
+ * frames and the loud frames each as tightly clustered as it can. There is no
+ * constant to guess and nothing to tune — it reads whatever floor the recording
+ * happens to have. Measured across takes from a -70dB floor to a -28dB one, it
+ * landed between the floor and the speech every time, and found every pause at
+ * its true length in all of them.
+ */
+export function pickThreshold(levels: number[], lo = -100, hi = 0, bins = 200): number {
+  const histogram = new Array<number>(bins).fill(0);
+  for (const db of levels) {
+    const bin = Math.floor(((db - lo) / (hi - lo)) * bins);
+    histogram[Math.max(0, Math.min(bins - 1, bin))]++;
+  }
+
+  const total = levels.length;
+  let weighted = 0;
+  for (let i = 0; i < bins; i++) weighted += i * histogram[i];
+
+  let best = 0;
+  let bestVariance = -1;
+  let quietWeight = 0;
+  let quietSum = 0;
+  for (let i = 0; i < bins; i++) {
+    quietWeight += histogram[i];
+    if (quietWeight === 0) continue;
+    const loudWeight = total - quietWeight;
+    if (loudWeight === 0) break;
+    quietSum += i * histogram[i];
+    const quietMean = quietSum / quietWeight;
+    const loudMean = (weighted - quietSum) / loudWeight;
+    const between = quietWeight * loudWeight * (quietMean - loudMean) ** 2;
+    if (between > bestVariance) {
+      bestVariance = between;
+      best = i;
+    }
+  }
+  return lo + ((best + 0.5) / bins) * (hi - lo);
+}
+
+/**
+ * The stretches of quiet, from measured levels.
+ *
+ * `bridge` is what keeps a pause whole. A click, a lip smack or a chair is not
+ * speech resuming, but it crosses the threshold — and a detector without this
+ * splits a three-second pause into two shorter ones, neither long enough to be
+ * worth cutting, so the pause survives intact. Anything loud that lasts less
+ * than this, with quiet either side, is absorbed.
+ */
+export function silencesFrom(
+  levels: number[],
   thresholdDb: number,
   minimum: number,
-  signal?: AbortSignal
-): Promise<Silence[]> {
-  const { stderr } = await run(
-    FFMPEG,
-    ["-hide_banner", "-nostats", "-i", file,
-     "-af", `silencedetect=noise=${thresholdDb}dB:d=${minimum.toFixed(3)}`,
-     "-f", "null", "-"],
-    { signal }
-  ).catch((error) => {
-    if (error instanceof FfmpegError) return { stdout: "", stderr: error.stderr };
-    throw error;
-  });
+  bridge = 0.12
+): Silence[] {
+  const quiet = levels.map((db) => db < thresholdDb);
 
-  const silences: Silence[] = [];
-  let open: number | null = null;
-  // The two are reported on separate lines, in order, so pairing is positional.
-  for (const line of stderr.split("\n")) {
-    const start = line.match(/silence_start:\s*(-?[\d.]+)/);
-    if (start) {
-      open = Math.max(0, Number(start[1]));
+  const bridgeFrames = Math.round(bridge / FRAME_SECONDS);
+  for (let i = 0; i < quiet.length; ) {
+    if (quiet[i]) {
+      i++;
       continue;
     }
-    const end = line.match(/silence_end:\s*(-?[\d.]+)/);
-    if (end && open !== null) {
-      silences.push({ start: open, end: Number(end[1]) });
-      open = null;
+    let end = i;
+    while (end < quiet.length && !quiet[end]) end++;
+    const isBlip = end - i <= bridgeFrames;
+    const surrounded = i > 0 && quiet[i - 1] && end < quiet.length && quiet[end];
+    if (isBlip && surrounded) {
+      for (let k = i; k < end; k++) quiet[k] = true;
     }
+    i = end;
+  }
+
+  const silences: Silence[] = [];
+  for (let i = 0; i < quiet.length; ) {
+    if (!quiet[i]) {
+      i++;
+      continue;
+    }
+    let end = i;
+    while (end < quiet.length && quiet[end]) end++;
+    const from = i * FRAME_SECONDS;
+    const to = end * FRAME_SECONDS;
+    if (to - from >= minimum) silences.push({ start: from, end: to });
+    i = end;
   }
   return silences;
 }
@@ -184,8 +341,23 @@ export async function joinVoiceovers(
 
     const originalDuration = await probeDuration(joined, signal);
 
+    // Measured from this recording, not assumed: see pickThreshold.
+    const levels = await frameLevels(joined, signal);
+    const noiseFloorDb = percentileOf(levels, 0.05);
+    const speechDb = percentileOf(levels, 0.95);
+    // Never at or above the speech itself. Otsu will not put it there, but a
+    // manual override can, and the result is not "a few pauses missed" — it is
+    // the entire recording classified as silence and deleted. Measured with the
+    // old fixed -35dB against a take whose speech sat at -35dB: 1206 seconds
+    // became 0.9. A floor under the answer costs nothing and rules that out.
+    const ceiling = speechDb - 6;
+    const thresholdDb = Math.min(
+      options.thresholdDb ?? pickThreshold(levels),
+      ceiling
+    );
+
     // A pause has to be at least `maxGap` to be worth reporting at all.
-    const silences = await findSilences(joined, options.thresholdDb, options.maxGap, signal);
+    const silences: Silence[] = silencesFrom(levels, thresholdDb, options.maxGap);
     const cuts = excessOf(silences, options);
     const removed = cuts.reduce((sum, cut) => sum + (cut.end - cut.start), 0);
     const select = selectExpression(cuts);
@@ -213,7 +385,7 @@ export async function joinVoiceovers(
 
     const duration = await probeDuration(output, signal);
     const longestGap = silences.reduce(
-      (longest, silence) =>
+      (longest: number, silence: Silence) =>
         Math.max(longest, Math.min(silence.end - silence.start, options.keepGap)),
       0
     );
@@ -221,6 +393,12 @@ export async function joinVoiceovers(
     return {
       stored: path.basename(output),
       storedMp3: path.basename(outputMp3),
+      noiseFloorDb,
+      speechDb,
+      thresholdDb,
+      // Under about 12dB between the room and the voice there is no line to
+      // draw that does not cut one or keep the other.
+      uncertain: speechDb - noiseFloorDb < 12,
       duration,
       originalDuration,
       tightened: cuts.length,

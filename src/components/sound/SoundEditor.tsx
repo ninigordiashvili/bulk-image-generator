@@ -247,6 +247,12 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
               is treated as one pause rather than two.
             </p>
             <p className="text-[11px] text-muted">
+              How quiet counts as a pause is measured from your own recording, so
+              room tone, a noisy preamp or a hot mic all read correctly without a
+              setting. A click or a chair in the middle of a pause is ignored
+              rather than splitting it in two.
+            </p>
+            <p className="text-[11px] text-muted">
               Speech is never touched. Silence detection calls a pause over a
               moment <em>after</em> the word has already started, so the cut
               stops short by the breath above and lets the real run-up back in —
@@ -286,6 +292,25 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
                 {report.tightened === 1 ? "" : "s"} shortened,{" "}
                 {report.removed.toFixed(1)}s of dead air removed.
               </p>
+              {/* What it measured, because "it left some long pauses" is
+                  otherwise impossible to diagnose from the outside. */}
+              <p className="text-[11px] text-muted">
+                Your room sits at {report.noiseFloorDb.toFixed(0)}dB and your
+                voice at {report.speechDb.toFixed(0)}dB, so a pause was counted
+                as anything under{" "}
+                <span className="font-mono">{report.thresholdDb.toFixed(0)}dB</span>.
+                {report.longestGap > 0 &&
+                  ` Longest pause left: ${report.longestGap.toFixed(2)}s.`}
+              </p>
+              {report.uncertain && (
+                <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-200/90">
+                  There is only{" "}
+                  {(report.speechDb - report.noiseFloorDb).toFixed(0)}dB between
+                  the room and the voice on this recording, which is not much to
+                  tell them apart — worth a listen before you use it. A quieter
+                  room, or recording a little louder, gives a cleaner cut.
+                </p>
+              )}
               <audio src={url} controls className="w-full" />
               <div className="grid grid-cols-2 gap-2">
                 <a href={url} download="narration.m4a" className="btn-primary text-center">
