@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatDuration } from "@/lib/editor/format";
 import { makeThumbnail } from "@/lib/editor/media";
 import { selectTimeline, useEditorStore } from "@/store/editorStore";
@@ -10,6 +10,7 @@ import { ExportPanel } from "./ExportPanel";
 import { MediaIntake } from "./MediaIntake";
 import { PreviewStage } from "./PreviewStage";
 import { SettingsPanel } from "./SettingsPanel";
+import { TimelineEditor } from "./TimelineEditor";
 import { TextMoments } from "./TextMoments";
 
 export function VideoEditor({ renderable }: { renderable: boolean }) {
@@ -17,6 +18,25 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
   const audio = useEditorStore((state) => state.audio);
   const settings = useEditorStore((state) => state.settings);
   const moments = useEditorStore((state) => state.moments);
+  const edits = useEditorStore((state) => state.edits);
+  const setClipStart = useEditorStore((state) => state.setClipStart);
+  const setClipLength = useEditorStore((state) => state.setClipLength);
+  const resetClip = useEditorStore((state) => state.resetClip);
+  const resetAllClips = useEditorStore((state) => state.resetAllClips);
+
+  // Shared between the preview and the timeline editor: the clock one writes
+  // and the other reads, plus the seek that lets the timeline drive playback.
+  // A ref owned here, written and read through stable callbacks, so neither
+  // component re-renders the other during playback.
+  const transport = useRef({ time: 0, seek: null as ((t: number) => void) | null });
+  const onFrame = useCallback((time: number) => {
+    transport.current.time = time;
+  }, []);
+  const onSeekReady = useCallback((seek: (time: number) => void) => {
+    transport.current.seek = seek;
+  }, []);
+  const readTime = useCallback(() => transport.current.time, []);
+  const seekTo = useCallback((time: number) => transport.current.seek?.(time), []);
   const zoom = useEditorStore((state) => state.zoom);
   const leadIn = useEditorStore((state) => state.leadIn);
   const tailSeconds = useEditorStore((state) => state.tailSeconds);
@@ -38,8 +58,8 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
   const dismissExport = useEditorStore((state) => state.dismissExport);
 
   const timeline = useMemo(
-    () => selectTimeline({ images, audio, tailSeconds, leadIn, settings }),
-    [images, audio, tailSeconds, leadIn, settings]
+    () => selectTimeline({ images, audio, tailSeconds, leadIn, settings, edits }),
+    [images, audio, tailSeconds, leadIn, settings, edits]
   );
 
   const thumbnails = useThumbnails(images);
@@ -92,13 +112,22 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
         </div>
       )}
 
-      {/* The settings column is far taller than the preview, and every setting
-          in it changes what the preview shows — so the preview follows you down
-          it rather than scrolling away at the top. `items-start` keeps the grid
-          from stretching the column, which is what makes the sticky child's
-          containing block the full row height. */}
-      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(320px,1fr)]">
-        <div className="space-y-4 lg:sticky lg:top-4">
+      {/* Everything below changes what the preview shows, and there is far more
+          of it than fits on a screen — so the preview follows you down rather
+          than scrolling away at the top. Only the preview sticks, not the whole
+          column: a sticky box taller than the viewport pins its top edge and
+          pushes its own contents off the bottom. The columns are left to
+          stretch — a sticky child can only travel as far as its own column, and
+          the settings column is the taller of the two.
+
+          The timeline travels with it, because dragging a clip is something you
+          do *while* watching the result, and a sticky preview that covered the
+          timeline would have made the editor worse rather than better. The pair
+          is capped at the viewport and scrolls inside itself on a short screen,
+          so it can never pin its own controls out of reach. */}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(320px,1fr)]">
+        <div className="space-y-4">
+          <div className="space-y-4 lg:sticky lg:top-4 lg:z-20 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
           <PreviewStage
             timeline={timeline}
             images={images}
@@ -108,10 +137,28 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
             zoomAmountMotion={settings.zoomAmountMotion}
             film={settings.film}
             moments={moments}
+            onFrame={onFrame}
+            onSeekReady={onSeekReady}
             maxStretch={settings.maxStretch}
             thumbnails={thumbnails}
             onToggleImage={toggleImage}
           />
+
+          <TimelineEditor
+            timeline={timeline}
+            images={images}
+            thumbnails={thumbnails}
+            edits={edits}
+            disabled={busy}
+            readTime={readTime}
+            onSeek={seekTo}
+            onStart={setClipStart}
+            onLength={setClipLength}
+            onReset={resetClip}
+            onResetAll={resetAllClips}
+            onToggle={toggleImage}
+          />
+          </div>
 
           <CueList
             images={images}

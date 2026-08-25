@@ -19,6 +19,17 @@ export interface TimelineInput {
    * length of its own.
    */
   fixedLength?: number;
+  /**
+   * Where the user dragged it to, overriding the filename cue and the audio
+   * alignment both. Null or undefined means nobody has moved it.
+   */
+  overrideStart?: number | null;
+  /**
+   * How long the user says it holds, overriding everything above. A still with
+   * one owns its length the way an avatar always has; a motion clip with one
+   * is stretched or compressed to fill it.
+   */
+  overrideLength?: number | null;
   excluded: boolean;
 }
 
@@ -32,6 +43,8 @@ export interface TimelineClip {
   index: number;
   /** True when nothing may push or shorten this clip: it owns its length. */
   anchored: boolean;
+  /** True when a hand put it here, rather than a filename. */
+  edited: boolean;
 }
 
 export interface Timeline {
@@ -82,7 +95,9 @@ export function buildTimeline({
 
   for (const item of items) {
     if (item.excluded) continue;
-    const cue = item.alignedStart ?? item.seconds;
+    // A hand beats a filename, and a filename beats nothing. Alignment sits in
+    // between: it is a better reading of the same cue, not a decision.
+    const cue = item.overrideStart ?? item.alignedStart ?? item.seconds;
     if (cue === null || cue === undefined || Number.isNaN(cue)) {
       warnings.push(`${item.label} — no timestamp in the filename, skipped.`);
       continue;
@@ -91,7 +106,12 @@ export function buildTimeline({
       warnings.push(`${item.label} — negative timestamp, skipped.`);
       continue;
     }
-    usable.push({ ...item, seconds: cue });
+    usable.push({
+      ...item,
+      seconds: cue,
+      // An explicit length owns the slot exactly as an avatar's speech does.
+      fixedLength: item.overrideLength ?? item.fixedLength,
+    });
   }
 
   // Ties break on label so the order is stable across reloads rather than
@@ -110,7 +130,12 @@ export function buildTimeline({
       previous &&
       previous.seconds === item.seconds &&
       previous.fixedLength === undefined &&
-      item.fixedLength === undefined
+      item.fixedLength === undefined &&
+      // Two things dragged to the same instant is a thing someone did, and the
+      // second one simply follows the first. Only a *naming* collision is a
+      // mistake worth refusing.
+      previous.overrideStart == null &&
+      item.overrideStart == null
     ) {
       warnings.push(`${item.label} — same timestamp as ${previous.label}, skipped.`);
       continue;
@@ -151,7 +176,9 @@ export function buildTimeline({
   for (const item of inRange) {
     const start = Math.max(item.seconds!, cursor);
     if (item.fixedLength !== undefined) {
-      if (start > item.seconds! + 0.001) {
+      // Only a talking clip has lips to fall out of sync; a still or a motion
+      // clip given a length by hand is just a clip that got pushed.
+      if (start > item.seconds! + 0.001 && item.kind === "avatar") {
         warnings.push(
           `${item.label} — pushed ${(start - item.seconds!).toFixed(1)}s late by the clip ` +
             `before it, so its lip sync will drift. Move one of the two cues.`
@@ -189,8 +216,14 @@ export function buildTimeline({
       slots[i].end = i + 1 < slots.length ? slots[i + 1].start : total;
     }
 
+    // A clip the user positioned by hand is never dropped for being short:
+    // they can see how long it is and they chose it. The rule exists to stop a
+    // *cue* collision flashing an image for a quarter of a second.
     const victim = slots.findIndex(
-      (slot) => !slot.anchored && (slot.end ?? 0) - slot.start < minVisualSeconds - 0.001
+      (slot) =>
+        !slot.anchored &&
+        slot.item.overrideStart == null &&
+        (slot.end ?? 0) - slot.start < minVisualSeconds - 0.001
     );
     if (victim < 0) break;
 
@@ -219,6 +252,7 @@ export function buildTimeline({
       end: round(slots[0].start),
       index: 0,
       anchored: false,
+      edited: false,
     });
   }
 
@@ -234,6 +268,8 @@ export function buildTimeline({
       end,
       index: 0,
       anchored: slot.anchored,
+      edited:
+        slot.item.overrideStart != null || slot.item.overrideLength != null,
     });
   }
 

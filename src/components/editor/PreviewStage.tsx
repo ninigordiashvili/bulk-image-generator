@@ -27,6 +27,15 @@ interface Props {
   zoomAmountMotion: number;
   film: FilmLook;
   moments: TextMoment[];
+  /**
+   * Called on every drawn frame with the current time, and once with this
+   * stage's own seek. Together they let the timeline editor draw a playhead and
+   * move it without either component re-rendering the other sixty times a
+   * second. Callbacks rather than a shared object, because writing into a prop
+   * is not something a component may do.
+   */
+  onFrame?: (time: number) => void;
+  onSeekReady?: (seek: (time: number) => void) => void;
   maxStretch: number;
   thumbnails: Map<string, string>;
   onToggleImage: (id: string) => void;
@@ -41,6 +50,8 @@ export function PreviewStage({
   zoomAmountMotion,
   film,
   moments,
+  onFrame,
+  onSeekReady,
   maxStretch,
   thumbnails,
   onToggleImage,
@@ -243,6 +254,7 @@ export function PreviewStage({
         audioRef.current?.pause();
       }
       timeRef.current = time;
+      onFrame?.(time);
 
       const index = clipAt(clips, time);
       const clip = index >= 0 ? clips[index] : null;
@@ -387,8 +399,13 @@ export function PreviewStage({
     return () => cancelAnimationFrame(frame);
   }, [
     byId, clips, currentTime, total,
-    zoom, zoomAmount, zoomAmountMotion, film, maxStretch, videoFor,
+    zoom, zoomAmount, zoomAmountMotion, film, maxStretch, videoFor, onFrame,
   ]);
+
+  // Hand the seek out, so a click on the timeline moves this playhead.
+  useEffect(() => {
+    onSeekReady?.(seek);
+  }, [onSeekReady, seek]);
 
   const onScrub = (event: React.MouseEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -400,17 +417,17 @@ export function PreviewStage({
 
   return (
     <section className="panel space-y-3">
-      {/* Capped against the viewport, not just the column: the panel is sticky,
-          and one taller than the screen would pin its top and leave the
-          transport controls permanently below the fold. `object-contain` means
-          the cap letterboxes rather than stretching the picture. */}
+      {/* Capped against the viewport, not just the column: the panel is sticky
+          and travels with the timeline below it, so the pair has to fit on a
+          screen together. `object-contain` means the cap letterboxes rather
+          than stretching the picture. */}
       <div className="relative overflow-hidden rounded-lg bg-black">
         <canvas
           ref={canvasRef}
           width={PREVIEW_WIDTH}
           height={PREVIEW_HEIGHT}
           onClick={toggle}
-          className="block aspect-video max-h-[58vh] w-full cursor-pointer object-contain"
+          className="block aspect-video max-h-[44vh] w-full cursor-pointer object-contain"
         />
         {empty && (
           <div className="absolute inset-0 grid place-items-center px-6 text-center">
