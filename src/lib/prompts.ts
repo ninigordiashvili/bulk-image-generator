@@ -11,6 +11,19 @@ export const CHARACTER_TAG_RE = /@(\d+)/g;
  */
 export const CUE_LINE_RE = /^#[ \t]*(\S+)[ \t]*$/;
 
+/**
+ * The same thing written on one line: `#0-00 a wide shot of the valley`.
+ *
+ * Both forms are natural to type and there is no reason to accept only one.
+ * This one is deliberately narrower, though: the tag has to look like a
+ * timestamp — digits with dashes, dots or colons between them — because a
+ * prompt's *first word* is very often an ordinary hashtag, and turning
+ * `#cinematic wide shot` into a file called `cinematic.png` would be worse
+ * than not reading it at all. A tag alone on its line stays unrestricted,
+ * since a line with nothing else on it can only have been meant as a name.
+ */
+export const INLINE_CUE_RE = /^#[ \t]*(\d+(?:[-_.:]\d+)*)[ \t]+(\S.*)$/;
+
 /** Everything else is replaced: this ends up as a filename on three platforms. */
 const UNSAFE_TAG_CHARS = /[^A-Za-z0-9._-]+/g;
 
@@ -35,23 +48,37 @@ export function isCueLine(line: string): boolean {
   return CUE_LINE_RE.test(line.trim());
 }
 
+/** A cue and its prompt sharing one line, or null if this isn't that. */
+export function inlineCueOf(line: string): { tag: string; rest: string } | null {
+  const match = line.trim().match(INLINE_CUE_RE);
+  if (!match) return null;
+  const tag = sanitizeCueTag(match[1]);
+  return tag ? { tag, rest: match[2].trim() } : null;
+}
+
+/** True for either form, which is what decides whether cues are in play at all. */
+export function hasCue(line: string): boolean {
+  return isCueLine(line) || inlineCueOf(line) !== null;
+}
+
 /**
  * The first cue tag in a free-text prompt. Used by the video storyboard, where
  * a prompt is one textarea per row rather than a list.
  */
 export function cueTagIn(text: string): string | null {
   for (const line of text.split("\n")) {
-    const tag = cueTagOf(line);
+    const tag = cueTagOf(line) ?? inlineCueOf(line)?.tag ?? null;
     if (tag) return tag;
   }
   return null;
 }
 
-/** The prompt without its cue lines — a filename is not part of the prompt. */
+/** The prompt without its cues — a filename is not part of the prompt. */
 export function stripCueLines(text: string): string {
   return text
     .split("\n")
     .filter((line) => !isCueLine(line))
+    .map((line) => inlineCueOf(line)?.rest ?? line)
     .join("\n")
     .trim();
 }
@@ -83,7 +110,7 @@ interface PromptBlock {
  */
 export function parsePrompts(text: string): PromptItem[] {
   const lines = text.split("\n");
-  const blocks = lines.some(isCueLine) ? taggedBlocks(lines) : onePerLine(lines);
+  const blocks = lines.some(hasCue) ? taggedBlocks(lines) : onePerLine(lines);
   return blocks.map((block, index) => ({
     id: `p${index}-${hashLine(block.raw)}`,
     raw: block.raw,
@@ -117,6 +144,14 @@ function taggedBlocks(lines: string[]): PromptBlock[] {
       open = { raw: "", tag: cueTagOf(trimmed) };
       continue;
     }
+    const inline = inlineCueOf(trimmed);
+    if (inline) {
+      // Tag and prompt on one line is a whole prompt by itself. It still opens
+      // a block, so a continuation line underneath belongs to it.
+      flush();
+      open = { raw: inline.rest, tag: inline.tag };
+      continue;
+    }
     if (trimmed.length === 0) continue;
     if (open) open.raw = open.raw ? `${open.raw}\n${trimmed}` : trimmed;
     // Text above the first cue keeps the one-per-line reading, so a stray
@@ -131,7 +166,7 @@ function taggedBlocks(lines: string[]): PromptBlock[] {
 /** Cue mistakes worth surfacing before a batch spends anything. */
 export function cueIssues(text: string): { empty: string[]; duplicates: string[] } {
   const lines = text.split("\n");
-  if (!lines.some(isCueLine)) return { empty: [], duplicates: [] };
+  if (!lines.some(hasCue)) return { empty: [], duplicates: [] };
 
   const empty: string[] = [];
   let openTag: string | null = null;
@@ -148,6 +183,14 @@ export function cueIssues(text: string): { empty: string[]; duplicates: string[]
     if (isCueLine(trimmed)) {
       close();
       openTag = cueTagOf(trimmed) ?? trimmed;
+      continue;
+    }
+    const inline = inlineCueOf(trimmed);
+    if (inline) {
+      close();
+      // It carries its own text, so it can never be one of the empty ones.
+      openTag = inline.tag;
+      openHasText = true;
       continue;
     }
     if (trimmed.length > 0) openHasText = true;

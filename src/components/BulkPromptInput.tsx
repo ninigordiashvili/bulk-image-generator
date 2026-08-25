@@ -1,28 +1,50 @@
 "use client";
 
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { CHARACTER_TAG_RE, cueIssues, isCueLine, parsePrompts } from "@/lib/prompts";
+import {
+  CHARACTER_TAG_RE,
+  INLINE_CUE_RE,
+  cueIssues,
+  isCueLine,
+  parsePrompts,
+} from "@/lib/prompts";
 import { useGenerationStore } from "@/store/generationStore";
 import { findModel, referenceLimit } from "@/lib/kieModels";
 import { MAX_PROMPTS, MAX_PROMPT_CHARS } from "@/types";
 
 /** Splits a line into plain text and `@N` tokens, marking tokens with no character. */
+const CUE_MARK =
+  "rounded-sm bg-emerald-500/25 text-transparent underline decoration-emerald-400 decoration-2 underline-offset-2";
+
 function highlightLine(line: string, knownIds: Set<number>): ReactNode[] {
-  // A cue line is a filename, not prompt text, and reads better as one block.
+  // A cue is a filename, not prompt text, and reads better as one block.
   if (isCueLine(line)) {
     return [
-      <mark
-        key="cue"
-        className="rounded-sm bg-emerald-500/25 text-transparent underline decoration-emerald-400 decoration-2 underline-offset-2"
-      >
+      <mark key="cue" className={CUE_MARK}>
         {line}
       </mark>,
     ];
   }
+
   const nodes: ReactNode[] = [];
   let cursor = 0;
+
+  // A cue can also open a line that carries its prompt as well; only the cue
+  // itself is marked, and the rest of the line highlights as normal.
+  const inline = line.match(INLINE_CUE_RE);
+  if (inline) {
+    const cue = line.slice(0, line.length - inline[2].length);
+    nodes.push(
+      <mark key="inline-cue" className={CUE_MARK}>
+        {cue}
+      </mark>
+    );
+    cursor = cue.length;
+  }
+
   for (const match of line.matchAll(CHARACTER_TAG_RE)) {
     const start = match.index!;
+    if (start < cursor) continue;
     if (start > cursor) nodes.push(line.slice(cursor, start));
     const known = knownIds.has(Number(match[1]));
     nodes.push(
@@ -156,7 +178,7 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
             }
           }}
           placeholder={
-            "#0-00\nWolves howling on a dark ridge above an empty valley at night\n\n#0-05\nSmall canvas wall tent pitched on a grassy bench above a creek\n\n— or one prompt per line, with no #cues, to name files by their text"
+            "#0-00 Wolves howling on a dark ridge above an empty valley at night\n#0-05 Small canvas wall tent pitched on a grassy bench above a creek\n\n— the prompt can also go on the line below its #cue\n— or one prompt per line, with no #cues, to name files by their text"
           }
           className="relative w-full resize-y bg-transparent px-3 py-2 font-mono text-sm leading-6 text-foreground caret-white outline-none placeholder:text-muted disabled:cursor-not-allowed"
         />
@@ -236,7 +258,8 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
                   Tagged characters are attached to that prompt; pinned ones are
                   attached to every prompt. Start a line with{" "}
                   <span className="font-mono text-emerald-400">#0-00</span> to
-                  name that prompt&rsquo;s image for the video editor.
+                  name that prompt&rsquo;s image for the video editor — with the
+                  prompt on the same line or the next one, whichever you prefer.
                 </>
               )}
             </p>

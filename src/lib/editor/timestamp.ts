@@ -78,7 +78,9 @@ export function secondsToCue(seconds: number): string {
  * without one nothing changes.
  */
 export function parseClock(text: string): number | null {
-  const trimmed = text.trim();
+  // A leading `#` is how a cue is written everywhere else in the app, so it is
+  // accepted here too rather than being a thing you have to remember to omit.
+  const trimmed = text.trim().replace(/^#[ \t]*/, "");
   if (!trimmed) return null;
 
   if (/[:\-_]/.test(trimmed)) {

@@ -382,7 +382,7 @@ export function AudioTrimmer({
             </h2>
             <p className="text-xs text-muted">
               {formatTime(total, true)} total · drag to select, scroll to zoom · type a time
-              like 3:14 in Start to jump there
+              like 3:14 or #3-14 in Start to jump there
             </p>
           </div>
           <div className="flex items-center gap-1">
@@ -484,7 +484,7 @@ export function AudioTrimmer({
               // will not accept the colon. Plain seconds still work.
               value={startDraft ?? formatTime(selStart, true)}
               placeholder="3:14"
-              title="Type 3:14 for three minutes fourteen, or 194 for seconds. Enter jumps there and zooms in."
+              title="Type 3:14 or #3-14 for three minutes fourteen, or 194 for seconds. Enter jumps there and zooms in."
               onChange={(event) => setStartDraft(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {

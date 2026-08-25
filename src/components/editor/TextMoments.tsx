@@ -161,7 +161,7 @@ function MomentRow({
           inputMode="numeric"
           value={startDraft ?? formatTime(moment.start, true)}
           disabled={disabled}
-          title="When it appears. 3:14 or plain seconds."
+          title="When it appears. 3:14, #3-14, or plain seconds."
           onChange={(event) => setStartDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") commitStart();
