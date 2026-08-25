@@ -55,7 +55,7 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
       : null;
 
   return (
-    <main className="mx-auto w-full max-w-[1600px] space-y-4 px-6 py-8">
+    <main className="mx-auto flex w-full max-w-[1600px] flex-col gap-4 px-6 py-8 lg:h-dvh lg:overflow-hidden lg:py-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold">Video Editor</h1>
@@ -92,13 +92,15 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
         </div>
       )}
 
-      {/* The settings column is far taller than the preview, and every setting
-          in it changes what the preview shows — so the preview follows you down
-          it rather than scrolling away at the top. `items-start` keeps the grid
-          from stretching the column, which is what makes the sticky child's
-          containing block the full row height. */}
-      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(320px,1fr)]">
-        <div className="space-y-4 lg:sticky lg:top-4">
+      {/* Each column scrolls on its own, and the page itself does not. Every
+          setting on the right changes what the preview shows, so reading down
+          the settings must not carry the preview away — and a sticky preview,
+          which is the other way to get that, freezes one part of a page that is
+          still moving underneath it. Two independent panes are the honest
+          version of the same thing. `min-h-0` is what lets a grid child scroll
+          rather than stretching its track to fit its contents. */}
+      <div className="grid gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,3fr)_minmax(320px,1fr)]">
+        <div className="space-y-4 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
           <PreviewStage
             timeline={timeline}
             images={images}
@@ -122,7 +124,7 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
           />
         </div>
 
-        <div className="space-y-4">
+        <div className="space-y-4 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
           <MediaIntake
             audio={audio}
             imageCount={images.length}

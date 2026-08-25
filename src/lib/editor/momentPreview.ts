@@ -9,9 +9,16 @@ import type { TextMoment } from "@/types/editor";
  * text somewhere the export won't is worse than no preview, because it is
  * believed.
  */
-const FADE_IN = 0.35;
-const FADE_OUT = 0.45;
 const TRAVEL = 0.55;
+
+/** Mirrors fadesOf in server/editor/textOverlay.ts; see the note there. */
+function fadesOf(moment: TextMoment): { in: number; out: number } {
+  const fadeIn = Math.max(0, moment.fadeIn ?? 0.35);
+  const fadeOut = Math.max(0, moment.fadeOut ?? 0.45);
+  const room = Math.max(0.02, moment.duration - 0.02);
+  const scale = fadeIn + fadeOut > room ? room / (fadeIn + fadeOut) : 1;
+  return { in: fadeIn * scale, out: fadeOut * scale };
+}
 
 const smoothstep = (p: number) => p * p * (3 - 2 * p);
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
@@ -44,8 +51,12 @@ export function drawMoments(
   for (const moment of momentsAt(moments, time)) {
     if (!moment.text.trim()) continue;
     const end = moment.start + moment.duration;
+    const ramp = fadesOf(moment);
     const fade = clamp01(
-      Math.min((time - moment.start) / FADE_IN, (end - time) / FADE_OUT)
+      Math.min(
+        (time - moment.start) / Math.max(ramp.in, 0.001),
+        (end - time) / Math.max(ramp.out, 0.001)
+      )
     );
     if (fade <= 0) continue;
 

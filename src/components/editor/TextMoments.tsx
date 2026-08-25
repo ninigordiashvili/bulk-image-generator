@@ -128,6 +128,13 @@ export function TextMoments({ disabled }: { disabled: boolean }) {
       >
         + Add one by hand
       </button>
+
+      {moments.length > 0 && (
+        <p className="text-[10px] text-muted">
+          A new one copies the last one&rsquo;s style, size, timing and fades, so
+          a run of them matches without setting each again.
+        </p>
+      )}
     </section>
   );
 }
@@ -279,6 +286,40 @@ function MomentRow({
             value={moment.size}
             disabled={disabled}
             onChange={(event) => onChange({ size: Number(event.target.value) })}
+            className="w-full accent-[var(--accent)] disabled:opacity-40"
+          />
+        </label>
+
+        <label className="text-[11px] text-muted">
+          <span className="flex items-baseline justify-between">
+            <span>Fade in</span>
+            <span className="font-mono text-foreground">{(moment.fadeIn ?? 0).toFixed(2)}s</span>
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={2}
+            step={0.05}
+            value={moment.fadeIn ?? 0.35}
+            disabled={disabled}
+            onChange={(event) => onChange({ fadeIn: Number(event.target.value) })}
+            className="w-full accent-[var(--accent)] disabled:opacity-40"
+          />
+        </label>
+
+        <label className="text-[11px] text-muted">
+          <span className="flex items-baseline justify-between">
+            <span>Fade out</span>
+            <span className="font-mono text-foreground">{(moment.fadeOut ?? 0).toFixed(2)}s</span>
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={2}
+            step={0.05}
+            value={moment.fadeOut ?? 0.45}
+            disabled={disabled}
+            onChange={(event) => onChange({ fadeOut: Number(event.target.value) })}
             className="w-full accent-[var(--accent)] disabled:opacity-40"
           />
         </label>

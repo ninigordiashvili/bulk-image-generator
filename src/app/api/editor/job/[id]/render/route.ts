@@ -4,13 +4,19 @@ import { renderJob } from "@/server/editor/render";
 import {
   FPS_CHOICES,
   MAX_IMAGES,
+  MAX_MOMENTS,
+  MOMENT_ANIMATIONS,
+  MOMENT_DEFAULTS,
   type FilmLook,
   type ErrorResponse,
   type JobStatus,
   type RenderClip,
   type RenderRequest,
   type RenderSettings,
+  type MomentAnimation,
+  type TextMoment,
 } from "@/types/editor";
+import { STYLE_ORDER, type MomentStyle } from "@/lib/editor/textStyles";
 
 const FILM_LOOKS: FilmLook[] = ["off", "subtle", "medium", "heavy"];
 
@@ -133,6 +139,48 @@ function validate(
       audio: body.audio ? String(body.audio) : null,
       total,
       settings,
+      moments: validateMoments(body.moments),
     },
   };
+}
+
+/**
+ * The text moments, checked one field at a time.
+ *
+ * This is rebuilt rather than passed through because every other part of the
+ * request is — and forgetting it here is precisely how the feature came to be
+ * drawn in the preview and absent from every export: the preview reads the
+ * store, the render reads this.
+ */
+function validateMoments(raw: unknown): TextMoment[] {
+  if (!Array.isArray(raw)) return [];
+  const moments: TextMoment[] = [];
+
+  for (const entry of raw.slice(0, MAX_MOMENTS)) {
+    const text = String(entry?.text ?? "").trim();
+    if (!text) continue;
+    const start = Number(entry?.start);
+    const duration = Number(entry?.duration);
+    if (!Number.isFinite(start) || start < 0) continue;
+    if (!Number.isFinite(duration) || duration <= 0) continue;
+
+    moments.push({
+      id: String(entry?.id ?? `m${moments.length}`),
+      text,
+      start,
+      duration: clamp(duration, 0.2, 60),
+      animation: MOMENT_ANIMATIONS.includes(entry?.animation as MomentAnimation)
+        ? (entry.animation as MomentAnimation)
+        : "rise",
+      style: STYLE_ORDER.includes(entry?.style as MomentStyle)
+        ? (entry.style as MomentStyle)
+        : "modern",
+      darken: clamp(Number(entry?.darken) || 0, 0, 0.9),
+      size: clamp(Number(entry?.size) || MOMENT_DEFAULTS.size, 0.02, 0.5),
+      fadeIn: clamp(Number(entry?.fadeIn ?? MOMENT_DEFAULTS.fadeIn), 0, 5),
+      fadeOut: clamp(Number(entry?.fadeOut ?? MOMENT_DEFAULTS.fadeOut), 0, 5),
+    });
+  }
+
+  return moments.sort((a, b) => a.start - b.start);
 }

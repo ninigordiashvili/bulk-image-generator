@@ -197,6 +197,9 @@ import type { MomentStyle } from "@/lib/editor/textStyles";
 /** How a text moment arrives on screen. */
 export type MomentAnimation = "rise" | "fade" | "drop";
 
+/** The same list at runtime, for validating what a request claims. */
+export const MOMENT_ANIMATIONS: MomentAnimation[] = ["rise", "fade", "drop"];
+
 /**
  * A phrase shown over the picture at a given moment.
  *
@@ -215,12 +218,18 @@ export interface TextMoment {
   darken: number;
   /** Text height as a fraction of frame height, so it scales with the export. */
   size: number;
+  /** Seconds to fade up on arrival. 0 snaps on. */
+  fadeIn: number;
+  /** And to fade away at the end. Counted inside `duration`, not added to it. */
+  fadeOut: number;
 }
 
 export const MOMENT_DEFAULTS = {
   duration: 4,
   animation: "rise" as MomentAnimation,
   style: "modern" as MomentStyle,
+  fadeIn: 0.35,
+  fadeOut: 0.45,
   darken: 0.35,
   size: 0.12,
 };

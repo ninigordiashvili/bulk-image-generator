@@ -147,6 +147,25 @@ interface EditorStore extends PersistedSettings {
   dismissExport: () => void;
 }
 
+/**
+ * The settings a new moment starts with: the last one's, or the defaults when
+ * there is no last one. Only the look is carried over — the words and the time
+ * belong to the moment itself.
+ */
+function lookOf(moments: TextMoment[]) {
+  const previous = moments[moments.length - 1];
+  if (!previous) return { ...MOMENT_DEFAULTS };
+  return {
+    duration: previous.duration,
+    animation: previous.animation,
+    style: previous.style ?? MOMENT_DEFAULTS.style,
+    darken: previous.darken,
+    size: previous.size,
+    fadeIn: previous.fadeIn ?? MOMENT_DEFAULTS.fadeIn,
+    fadeOut: previous.fadeOut ?? MOMENT_DEFAULTS.fadeOut,
+  };
+}
+
 let exportAbort: AbortController | null = null;
 
 /**
@@ -352,7 +371,11 @@ export const useEditorStore = create<EditorStore>()(
             id: candidate.id,
             text: candidate.text,
             start: candidate.start,
-            ...MOMENT_DEFAULTS,
+            // Whatever the last one was set to. Someone who dialled in a style,
+            // a size and a darkening wants the next one to match, and having to
+            // set all four again for every moment in a script is the tedious
+            // part of the job.
+            ...lookOf(state.moments),
           };
           return {
             moments: [...state.moments, moment].sort((a, b) => a.start - b.start),
@@ -367,7 +390,7 @@ export const useEditorStore = create<EditorStore>()(
             id: `own-${Date.now().toString(36)}-${state.moments.length}`,
             text: "",
             start,
-            ...MOMENT_DEFAULTS,
+            ...lookOf(state.moments),
           };
           return {
             moments: [...state.moments, moment].sort((a, b) => a.start - b.start),
@@ -572,7 +595,10 @@ export const useEditorStore = create<EditorStore>()(
           ...current,
           ...saved,
           settings: { ...DEFAULT_SETTINGS, ...(saved.settings ?? {}) },
-          moments: saved.moments ?? [],
+          moments: (saved.moments ?? []).map((moment) => ({
+            ...MOMENT_DEFAULTS,
+            ...moment,
+          })),
           transcript,
           // Derived from the transcript, so it is rebuilt rather than stored —
           // otherwise a change to the detector would never reach saved work.

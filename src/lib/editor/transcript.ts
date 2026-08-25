@@ -115,7 +115,8 @@ export type MomentKind =
   | "ordinal"
   | "money"
   | "percent"
-  | "big number";
+  | "big number"
+  | "called out";
 
 export interface MomentCandidate {
   /** Stable across re-scans of the same transcript, so ticks survive an edit. */
@@ -142,6 +143,16 @@ const PATTERNS: { kind: MomentKind; re: RegExp }[] = [
   // One trailing word only: "Top 5 things" is a title card, the rest of the
   // sentence is not.
   { kind: "countdown", re: /\btop\s+\d{1,3}(?:\s+[a-z]+)?/gi },
+  /**
+   * A number the narration announces rather than merely mentions: "number 4",
+   * "step 3", "part two", "chapter 9". Someone saying the words out loud is
+   * pointing at it, which is exactly the moment worth putting on screen — and
+   * it is why this sits above the plain-number patterns below.
+   */
+  {
+    kind: "called out",
+    re: /\b(?:number|no\.|step|part|chapter|reason|rule|fact|tip|item|point|lesson|level|stage|phase|round|volume|episode|day|week)\s+(?:\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|zero)\b/gi,
+  },
   { kind: "year", re: /\b(?:1[0-9]{3}|20[0-9]{2})\b/g },
   {
     kind: "count",

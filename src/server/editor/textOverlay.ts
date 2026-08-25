@@ -19,10 +19,21 @@ import type { TextMoment } from "@/types/editor";
 
 /** How many slices the dim ramp is cut into. */
 const STEPS = 5;
-const FADE_IN = 0.35;
-const FADE_OUT = 0.45;
 /** How long the text takes to travel to the centre. */
 const TRAVEL = 0.55;
+
+/**
+ * A fade can be set to zero, and can also be longer than the moment it belongs
+ * to. Both ends are clamped so the two halves never overlap and the text is
+ * always fully up for at least an instant.
+ */
+function fadesOf(moment: TextMoment): { in: number; out: number } {
+  const fadeIn = Math.max(0, moment.fadeIn ?? 0.35);
+  const fadeOut = Math.max(0, moment.fadeOut ?? 0.45);
+  const room = Math.max(0.02, moment.duration - 0.02);
+  const scale = fadeIn + fadeOut > room ? room / (fadeIn + fadeOut) : 1;
+  return { in: fadeIn * scale, out: fadeOut * scale };
+}
 
 /**
  * A font file for a style.
@@ -83,6 +94,7 @@ export function momentChain(
   height: number
 ): string[] {
   const end = start + moment.duration;
+  const fade = fadesOf(moment);
   const parts: string[] = [];
 
   // --- the dim behind it -------------------------------------------------
@@ -98,16 +110,16 @@ export function momentChain(
     for (let k = 1; k <= STEPS; k++) {
       steps.push(box(
         (darken * k) / STEPS,
-        start + ((k - 1) * FADE_IN) / STEPS,
-        start + (k * FADE_IN) / STEPS
+        start + ((k - 1) * fade.in) / STEPS,
+        start + (k * fade.in) / STEPS
       ));
     }
-    steps.push(box(darken, start + FADE_IN, end - FADE_OUT));
+    steps.push(box(darken, start + fade.in, end - fade.out));
     for (let k = STEPS - 1; k >= 1; k--) {
       steps.push(box(
         (darken * k) / STEPS,
-        end - FADE_OUT + ((STEPS - 1 - k) * FADE_OUT) / STEPS,
-        end - FADE_OUT + ((STEPS - k) * FADE_OUT) / STEPS
+        end - fade.out + ((STEPS - 1 - k) * fade.out) / STEPS,
+        end - fade.out + ((STEPS - k) * fade.out) / STEPS
       ));
     }
     parts.push(...steps.filter((step): step is string => step !== null));
@@ -124,8 +136,11 @@ export function momentChain(
         // Smoothstep, so it settles rather than stopping dead.
         `(h*${from})+(${centre}-(h*${from}))*ld(1)`;
 
+  // A zero fade would divide by zero; it becomes a single frame instead, which
+  // is a snap to anyone watching.
   const alpha =
-    `min(1,min((t-${fixed(start)})/${FADE_IN},(${fixed(end)}-t)/${FADE_OUT}))`;
+    `min(1,min((t-${fixed(start)})/${fixed(Math.max(fade.in, 0.001))},` +
+    `(${fixed(end)}-t)/${fixed(Math.max(fade.out, 0.001))}))`;
 
   const look = styleOf(moment.style);
   const font = fontFileFor(look.files);
