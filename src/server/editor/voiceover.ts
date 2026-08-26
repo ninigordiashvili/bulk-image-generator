@@ -138,6 +138,25 @@ const ROOM_SPREAD_DB = 6;
 const DIGITAL_SILENCE_DB = -90;
 
 /**
+ * How close to the floor a frame has to be to count as the room itself.
+ *
+ * Tighter than the silence line, and deliberately so: the line decides where a
+ * pause *is*, this decides where a pause is safe to cut, and the gap between
+ * the two is the decay of the last word and the swell of the next. See
+ * `toRoom`.
+ */
+const ROOM_MARGIN_DB = 3;
+
+/**
+ * And how long it has to stay there before the word is really over.
+ *
+ * One frame near the floor proves nothing — a decaying word passes through
+ * every level on its way down, and a swelling one on its way up. Sixty
+ * milliseconds of settled room does prove it.
+ */
+const ROOM_SETTLED_SECONDS = 0.06;
+
+/**
  * The shortest hole worth making.
  *
  * Below this a cut saves no meaningful time and risks a tick at the join, and
@@ -418,6 +437,9 @@ export function detectSilences(
     i = end;
   }
 
+  const room = noiseFloor(levels) + ROOM_MARGIN_DB;
+  const settled = Math.max(1, Math.round(ROOM_SETTLED_SECONDS / FRAME_SECONDS));
+
   const silences: Silence[] = [];
   for (let i = 0; i < quiet.length; ) {
     if (!quiet[i]) {
@@ -426,12 +448,53 @@ export function detectSilences(
     }
     let end = i;
     while (end < quiet.length && quiet[end]) end++;
-    const from = i * FRAME_SECONDS;
-    const to = end * FRAME_SECONDS;
+    const [core, coreEnd] = toRoom(levels, i, end, room, settled);
+    const from = core * FRAME_SECONDS;
+    const to = coreEnd * FRAME_SECONDS;
     if (to - from >= minimum) silences.push({ start: from, end: to });
     i = end;
   }
   return { silences, islands };
+}
+
+/**
+ * Pulls a pause in to where the room actually is.
+ *
+ * Being under the silence line is not the same as being room. A word does not
+ * stop, it decays, and it does not start, it swells — and both of those cross
+ * the line some way from either end. Everything up to that crossing was being
+ * called pause, so the guards measured their distance from a point that was
+ * already inside the word and the soft half of it was cut anyway. On the take
+ * that prompted this the first word swelled in over about half a second: the
+ * result began with a vertical edge at full level, the attack gone, which is
+ * what "like" losing its front sounds like.
+ *
+ * So each end is walked inward until the level has *settled* at the room — a
+ * short run of frames near the floor, not one frame that happened to dip. What
+ * is left is the part of the pause that is only room, and the guards are
+ * measured from there, which is what they always meant.
+ */
+function toRoom(
+  levels: number[],
+  start: number,
+  end: number,
+  room: number,
+  settled: number
+): [number, number] {
+  const quietAt = (i: number) => {
+    for (let k = i; k < i + settled; k++) {
+      if (k >= levels.length || levels[k] > room) return false;
+    }
+    return true;
+  };
+
+  let from = start;
+  while (from < end && !quietAt(from)) from++;
+
+  let to = end;
+  while (to > from && !quietAt(to - settled)) to--;
+
+  return from < to ? [from, to] : [start, start];
 }
 
 /**
