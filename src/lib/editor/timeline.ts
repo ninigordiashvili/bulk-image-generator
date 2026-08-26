@@ -62,9 +62,16 @@ const round = (value: number) => Math.round(value * 1000) / 1000;
  * Lays every visual out along the audio.
  *
  * The base rule is unchanged: a filename is a cue, and a visual holds the
- * screen until the next one's cue. What talking clips add is that they cannot
- * be cut short — an avatar interrupted mid-word is worse than a still arriving
- * late — so they are anchored at their length and everything else gives way.
+ * screen until the next one's cue. What talking clips add is that they own
+ * their position: an avatar is placed where its speech was matched against the
+ * bed, and nothing is allowed to move it. Everything else gives way to that,
+ * including — where two talking clips overlap — the tail of the earlier one.
+ *
+ * That ordering matters more than it looks. A still arriving late is a cut in
+ * the wrong place; an avatar arriving late is a face speaking words that are
+ * not being heard, and the error compounds down the film because each clip
+ * pushed late pushes the next one further. Losing the tail of a clip that has
+ * finished talking is the cheapest thing on the table.
  *
  * When giving way squeezes a still below `minVisualSeconds`, it's dropped
  * instead: a quarter-second flash of an image reads as a glitch, and the
@@ -149,18 +156,37 @@ export function buildTimeline({
   let cursor = 0;
 
   for (const item of inRange) {
-    const start = Math.max(item.seconds!, cursor);
     if (item.fixedLength !== undefined) {
-      if (start > item.seconds! + 0.001) {
-        warnings.push(
-          `${item.label} — pushed ${(start - item.seconds!).toFixed(1)}s late by the clip ` +
-            `before it, so its lip sync will drift. Move one of the two cues.`
-        );
+      // A talking clip sits where its speech was matched to the bed, and
+      // nothing may move it. Moving it is not a compromise, it is the whole
+      // defect: the lips play against narration they were never speaking.
+      //
+      // It used to give way to whatever ran into it, and the damage compounded
+      // — each avatar pushed late pushed the next one later still. Measured on
+      // five clips overlapping by half a second each: 0, 500, 1000, 1500 and
+      // 2000ms out, so the opening looked right and everything from the middle
+      // on was visibly wrong. That is the report this fixes.
+      const start = item.seconds!;
+      const previous = slots[slots.length - 1];
+      if (previous && previous.end !== null && previous.end > start + 0.001) {
+        // The clip before overruns it, so the clip before gives way. What it
+        // loses is its tail, which is a face that has already stopped talking;
+        // what it saves is every lip sync from here to the end of the film.
+        const lost = previous.end - start;
+        if (previous.anchored) {
+          warnings.push(
+            `${previous.item.label} — its last ${lost.toFixed(1)}s is cut off by ` +
+              `${item.label} starting. Both keep their lip sync; if the tail matters, ` +
+              `move one of the two cues.`
+          );
+        }
+        previous.end = Math.max(previous.start, start);
       }
       const end = Math.min(total, start + item.fixedLength);
       slots.push({ item, start, end, anchored: true });
       cursor = end;
     } else {
+      const start = Math.max(item.seconds!, cursor);
       slots.push({ item, start, end: null, anchored: false });
       cursor = start;
     }
