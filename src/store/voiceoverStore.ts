@@ -48,14 +48,19 @@ export const useVoiceoverStore = create<VoiceoverState>()(
       report: null,
       url: null,
       urlMp3: null,
-      // A second of quiet between sentences reads as a breath; much more and it
-      // reads as a mistake.
-      maxGap: 1,
-      keepGap: 0.8,
+      // These are measured in *room*, not in what a listener calls silence, and
+      // the two are not the same length. A word doesn't stop dead, it decays,
+      // and the next one swells in — both are heard as part of the gap but
+      // neither is room, and neither may be cut. On a normal read that is about
+      // half a second of ramp per gap, so a pause that sounds like 1.2s has
+      // nearer 0.7s of room in it. Capping the room at 0.7 and keeping 0.5 is
+      // what makes the gap you actually hear land under a second.
+      maxGap: 0.7,
+      keepGap: 0.5,
       // Enough of the run-up that the first consonant of the next word is
       // whole. It is never allowed below SPEECH_GUARD, which is where the
       // clipped attack starts to be audible.
-      leadIn: 0.3,
+      leadIn: 0.25,
 
       addFiles: (files) =>
         set((state) => {

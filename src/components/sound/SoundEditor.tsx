@@ -248,6 +248,15 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
               is treated as one pause rather than two.
             </p>
             <p className="text-[11px] text-muted">
+              These two are measured in <em>room tone</em>, which is shorter than
+              the gap you hear. A word decays rather than stopping, and the next
+              one swells in; both are heard as silence but neither is room, and
+              neither is ever cut. That is about half a second per gap, so a cap
+              of {maxGap.toFixed(1)}s leaves a gap that sounds nearer{" "}
+              {(keepGap + 0.5).toFixed(1)}s. If pauses still sound long, bring
+              the cap down rather than reaching for anything else.
+            </p>
+            <p className="text-[11px] text-muted">
               How quiet counts as a pause is measured from your own recording, so
               room tone, a noisy preamp or a hot mic all read correctly without a
               setting. A click or a chair in the middle of a pause is ignored
