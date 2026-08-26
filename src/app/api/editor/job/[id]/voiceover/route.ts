@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { clampPacing } from "@/lib/editor/pacing";
 import { NO_RENDER_REASON, canRender } from "@/server/editor/host";
 import { getJob } from "@/server/editor/jobs";
 import { joinVoiceovers } from "@/server/editor/voiceover";
@@ -47,12 +48,16 @@ export async function POST(
   if (files.length === 0) return fail("No voice tracks were named.");
   if (files.length > 100) return fail("That's more tracks than this will join at once.");
 
-  const maxGap = clamp(Number(body.maxGap) || 1, 0.2, 10);
-  // A pause can't be shortened to longer than the cap that flagged it.
-  const keepGap = clamp(Number(body.keepGap) || 0.8, 0.05, maxGap);
+  // The cap, what a capped pause becomes and how the kept time is split — each
+  // held to its floor and to the others. The floors are shared with the sliders
+  // so the numbers on screen are the numbers that get used.
+  const pacing = clampPacing({
+    maxGap: Number(body.maxGap),
+    keepGap: Number(body.keepGap),
+    leadIn: body.leadIn === undefined ? Number.NaN : Number(body.leadIn),
+  });
   const options = {
-    maxGap,
-    keepGap,
+    ...pacing,
     // Measured from the recording unless a number was sent deliberately. The
     // old default of -35 was the bug: a take whose room tone sat above it had
     // none of its pauses found at all.
@@ -60,12 +65,6 @@ export async function POST(
       body.thresholdDb === undefined || body.thresholdDb === null
         ? null
         : clamp(Number(body.thresholdDb), -80, -10),
-    // Nor can the run-up be longer than the pause it has to fit inside.
-    leadIn: clamp(
-      body.leadIn === undefined ? 0.2 : Number(body.leadIn) || 0,
-      0,
-      keepGap
-    ),
   };
 
   try {

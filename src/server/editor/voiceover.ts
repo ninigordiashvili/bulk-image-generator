@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { SPEECH_GUARD } from "@/lib/editor/pacing";
 import { FFMPEG, FfmpegError, probeDuration, run } from "./ffmpeg";
 import { resolveInside, type Job } from "./jobs";
 
@@ -8,15 +9,23 @@ import { resolveInside, type Job } from "./jobs";
  * Joining a set of voiceover files into one narration bed, and tightening the
  * pauses while it's at it.
  *
- * The obvious filter for the second part is `silenceremove`, and it is the
- * wrong one: its `stop_duration` is a threshold, not a cap. Set it to one
- * second and a two-second pause doesn't become one second, it very nearly
- * disappears — measured at 11.4s where 13.4s was wanted, with the one-second
- * pauses deleted outright at a 0.8 setting.
+ * THE RULE: nothing anyone said is ever altered, cut or shortened. Not a word,
+ * not a syllable, not the attack of a consonant or the tail of a vowel. The
+ * only thing this file is allowed to remove is the room — dead air in the
+ * middle of a long pause between sentences. Every decision below that could go
+ * either way goes the way that keeps audio. A pause left too long is a setting
+ * the user can turn down; a word with its middle missing is not recoverable,
+ * and it is what "like" turning into "lk" was.
+ *
+ * The obvious filter for this is `silenceremove`, and it is the wrong one: its
+ * `stop_duration` is a threshold, not a cap. Set it to one second and a
+ * two-second pause doesn't become one second, it very nearly disappears —
+ * measured at 11.4s where 13.4s was wanted, with the one-second pauses deleted
+ * outright at a 0.8 setting.
  *
  * So the pauses are found first and only the *excess* is cut: a gap longer than
  * `maxGap` loses everything past `keepGap`, and a gap shorter than that is left
- * exactly as recorded. Speech is never touched.
+ * exactly as recorded.
  *
  * Finding them is the part that has to be right. A fixed threshold does not
  * work: a pause in a real recording is not silence, it is the room, the preamp
@@ -25,6 +34,13 @@ import { resolveInside, type Job } from "./jobs";
  * floor, a fixed -35dB found every pause at -45dB and *none at all* at -28dB —
  * which is exactly the complaint that the long pauses survive. So the level is
  * measured from the recording itself; see `pickThreshold`.
+ *
+ * Measuring is never trusted on its own, though, because the rule cannot depend
+ * on getting a level right. Three separate things enforce it, and a cut has to
+ * survive all three: `SPEECH_GUARD` keeps every cut a clear distance away from
+ * the audio either side of it, `detectSilences` refuses to treat any sound long
+ * enough to be part of a word as room however quiet it is, and `keepIslands`
+ * cuts around whatever survived that test rather than through it.
  */
 
 export interface PaceOptions {
@@ -47,6 +63,9 @@ export interface PaceOptions {
    * than a vowel. Cutting up to that point takes the front off the word: the
    * clipped "s" or "f" that makes a tightened read sound wrong. So the cut
    * stops short, and the last of the pause is the original run-up to the word.
+   *
+   * This is a preference, not the safety margin. Whatever it is set to, no cut
+   * comes closer to the next word than `SPEECH_GUARD`.
    */
   leadIn: number;
 }
@@ -85,9 +104,34 @@ interface Silence {
 
 /**
  * How far above the silence line a bridged blip has to be before it is treated
- * as something someone said rather than as the room misbehaving.
+ * as something someone said rather than as the room misbehaving. Only ever
+ * consulted for a blip too short to be speech in the first place — see
+ * `ISLAND_MIN_SECONDS`.
  */
 const ISLAND_MARGIN_DB = 6;
+
+/**
+ * A sound this long is a person, whatever level it came in at.
+ *
+ * The old rule was level alone: anything less than 6dB over the line was
+ * absorbed into the pause and cut. That is what ate the middle of a word —
+ * "like" came back as "lk", because the vowel between the l and the k was a
+ * hair too quiet to clear the bar and short enough to be bridged, so it was
+ * classed as room and removed with the dead air around it. Nothing 60ms long
+ * with quiet either side of it is a click or a chair; the shortest real word
+ * runs to twice this. So duration decides first and level only breaks the tie
+ * for the 20 or 40ms flickers that a room genuinely does produce.
+ */
+const ISLAND_MIN_SECONDS = 0.06;
+
+/**
+ * The shortest hole worth making.
+ *
+ * Below this a cut saves no meaningful time and risks a tick at the join, and
+ * the pieces this size are the slivers left either side of something protected.
+ * Leaving them in place is free.
+ */
+const MIN_CUT = 0.15;
 
 /** 20ms of audio, which is fine enough to place a cut and coarse enough to be cheap. */
 const FRAME_SECONDS = 0.02;
@@ -263,7 +307,7 @@ export function silencesFrom(
 }
 
 /**
- * The same, plus the loud islands that were bridged over.
+ * The same, plus the sounds that were bridged over.
  *
  * The islands matter to the caller: bridging is what stops a click splitting a
  * pause in two, but the click itself must survive the cut — it might be a short
@@ -292,11 +336,15 @@ export function detectSilences(
       let peak = -Infinity;
       for (let k = i; k < end; k++) peak = Math.max(peak, levels[k]);
       for (let k = i; k < end; k++) quiet[k] = true;
-      // Only worth protecting if it could be a word. The line sits barely above
-      // the room, so room noise crosses it constantly; sparing every one of
-      // those would leave the cut in slivers and the output full of ticks.
-      // Something a person said is far louder than the room, not a hair over it.
-      if (peak > thresholdDb + ISLAND_MARGIN_DB) {
+      // Bridged for measuring, protected for cutting — unless it is both too
+      // short to be a word and too quiet to be anything but the room. A room
+      // does flicker over the line, often enough that sparing every flicker
+      // would leave the cut in slivers, so those two conditions together are
+      // the only way a bridged sound is allowed to go. Either one on its own
+      // keeps it: length wins over level, because a syllable can be quiet but
+      // a tick cannot be long.
+      const spansAWord = (end - i) * FRAME_SECONDS >= ISLAND_MIN_SECONDS;
+      if (spansAWord || peak > thresholdDb + ISLAND_MARGIN_DB) {
         islands.push({ start: i * FRAME_SECONDS, end: end * FRAME_SECONDS });
       }
     }
@@ -320,66 +368,101 @@ export function detectSilences(
 }
 
 /**
+ * How much of an over-long pause is kept, and how it is split between the two
+ * words either side of it.
+ *
+ * `keepGap` is the length asked for, but never less than a guard at each end:
+ * the hole goes in the dead middle of the pause and both edges stay a clear
+ * `SPEECH_GUARD` away from real audio. `leadIn` decides how the kept time is
+ * shared — more of it in front of the next word, less of it trailing the last
+ * one — and it can move the split but not close either guard.
+ */
+function keptPause({ keepGap, leadIn }: PaceOptions): { head: number; tail: number } {
+  const total = Math.max(keepGap, SPEECH_GUARD * 2);
+  const tail = Math.min(Math.max(leadIn, SPEECH_GUARD), total - SPEECH_GUARD);
+  return { head: total - tail, tail };
+}
+
+/** The whole of what an over-long pause is shortened to. */
+export function keptLength(options: PaceOptions): number {
+  const { head, tail } = keptPause(options);
+  return head + tail;
+}
+
+/**
  * The stretches to cut out of each over-long pause.
  *
- * The pause still ends up `keepGap` long, but it is taken from both ends: the
- * beginning, which is the tail of the word just spoken, and `leadIn` from the
- * end, which is the run-up to the word about to be spoken. Only the dead middle
- * goes. Taking it all from the front would leave the cut butted against the
- * next word and shave its attack off.
+ * The pause ends up `keepGap` long, but it is taken from both ends: the
+ * beginning, which is the tail of the word just spoken, and the end, which is
+ * the run-up to the word about to be spoken. Only the dead middle goes. Taking
+ * it all from the front would leave the cut butted against the next word and
+ * shave its attack off.
+ *
+ * Both ends are guarded whatever the settings say. `keepGap` and `leadIn` are
+ * sliders, and a slider is allowed to be dragged somewhere silly; the rule that
+ * speech is never touched is not a slider, so it is applied here rather than
+ * trusted to the values that arrive.
  */
-export function excessOf(
-  silences: Silence[],
-  { maxGap, keepGap, leadIn }: PaceOptions
-): Silence[] {
+export function excessOf(silences: Silence[], options: PaceOptions): Silence[] {
+  const { maxGap } = options;
+  const { head, tail } = keptPause(options);
+
   const cuts: Silence[] = [];
   for (const silence of silences) {
     const length = silence.end - silence.start;
-    if (length <= maxGap) continue;
+    // Never shortened below the two guards, so a pause that is already inside
+    // them is left exactly as recorded however low the cap was set.
+    if (length <= maxGap || length <= head + tail) continue;
 
-    // The lead can't be longer than the pause we're keeping, or the cut would
-    // start before the pause does.
-    const lead = Math.min(leadIn, keepGap);
-    const from = silence.start + (keepGap - lead);
-    const to = silence.end - lead;
-    if (to - from > 0.02) cuts.push({ start: from, end: to });
+    const from = silence.start + head;
+    const to = silence.end - tail;
+    if (to - from >= MIN_CUT) cuts.push({ start: from, end: to });
   }
   return cuts;
 }
 
 /**
- * An `aselect` expression that drops `cuts` and keeps everything else.
- * `asetpts` afterwards closes the holes so the result plays continuously.
- */
-/**
- * Takes the loud islands back out of the ranges to be removed.
+ * Takes the islands, and a guard around each of them, back out of the ranges to
+ * be removed.
  *
  * A pause with a click in it is one pause, which is why the click is bridged
  * over when the pause is measured. But the click itself is not silence, and if
  * it turns out to be a short word — "no", "right", a name — removing it would
  * be cutting speech. So the cut is split around it: the quiet either side goes,
  * the loud bit stays.
+ *
+ * With `SPEECH_GUARD` either side of it, for the same reason the ends of a cut
+ * are guarded. Butting a cut straight up against an island would take that
+ * word's run-up and its tail off even though the word itself survived, which is
+ * the clipped sound this is all here to avoid.
  */
 export function keepIslands(cuts: Silence[], islands: Silence[]): Silence[] {
   if (islands.length === 0) return cuts;
 
   let pieces = cuts;
   for (const island of islands) {
+    const from = island.start - SPEECH_GUARD;
+    const to = island.end + SPEECH_GUARD;
     const next: Silence[] = [];
     for (const cut of pieces) {
-      if (island.end <= cut.start || island.start >= cut.end) {
+      if (to <= cut.start || from >= cut.end) {
         next.push(cut);
         continue;
       }
-      if (island.start > cut.start) next.push({ start: cut.start, end: island.start });
-      if (island.end < cut.end) next.push({ start: island.end, end: cut.end });
+      if (from > cut.start) next.push({ start: cut.start, end: from });
+      if (to < cut.end) next.push({ start: to, end: cut.end });
     }
     pieces = next;
   }
-  // A sliver either side of an island is not worth a cut of its own.
-  return pieces.filter((piece) => piece.end - piece.start > 0.02);
+  // A sliver either side of an island is not worth a cut of its own: it saves
+  // nothing and a hole that small is heard as a tick rather than as tightening.
+  return pieces.filter((piece) => piece.end - piece.start >= MIN_CUT);
 }
 
+/**
+ * An `aselect` expression that drops `cuts` and keeps everything else.
+ * `asetpts` afterwards closes the holes so the result plays continuously.
+ */
 export function selectExpression(cuts: Silence[]): string {
   if (cuts.length === 0) return "";
   const terms = cuts
@@ -480,11 +563,14 @@ export async function joinVoiceovers(
     );
 
     const duration = await probeDuration(output, signal);
-    const longestGap = silences.reduce(
-      (longest: number, silence: Silence) =>
-        Math.max(longest, Math.min(silence.end - silence.start, options.keepGap)),
-      0
-    );
+    // What the longest pause ends up as: untouched if it was short enough to
+    // leave alone, otherwise shortened to the kept length — which is the two
+    // guards when `keepGap` was set below them.
+    const kept = keptLength(options);
+    const longestGap = silences.reduce((longest: number, silence: Silence) => {
+      const length = silence.end - silence.start;
+      return Math.max(longest, length > options.maxGap ? Math.min(length, kept) : length);
+    }, 0);
 
     return {
       stored: path.basename(output),

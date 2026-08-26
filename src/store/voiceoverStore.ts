@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { inScriptOrder } from "@/lib/editor/order";
+import { clampPacing } from "@/lib/editor/pacing";
 import { uploadFile } from "@/lib/editor/upload";
 import type { CreateJobResponse, ErrorResponse, PaceReport } from "@/types/editor";
 
@@ -52,8 +53,9 @@ export const useVoiceoverStore = create<VoiceoverState>()(
       maxGap: 1,
       keepGap: 0.8,
       // Enough of the run-up that the first consonant of the next word is
-      // whole. Below about 0.1s the clipped attack starts to be audible again.
-      leadIn: 0.2,
+      // whole. It is never allowed below SPEECH_GUARD, which is where the
+      // clipped attack starts to be audible.
+      leadIn: 0.3,
 
       addFiles: (files) =>
         set((state) => {
@@ -82,18 +84,16 @@ export const useVoiceoverStore = create<VoiceoverState>()(
         set((state) => ({ files: [], ...cleared(state), error: null })),
 
       setPacing: (patch) =>
-        set((state) => {
-          const maxGap = patch.maxGap ?? state.maxGap;
-          // A pause can't be shortened to longer than the cap that caught it,
-          // and the run-up has to fit inside what's left of the pause.
-          const keepGap = Math.min(patch.keepGap ?? state.keepGap, maxGap);
-          return {
-            maxGap,
-            keepGap,
-            leadIn: Math.min(patch.leadIn ?? state.leadIn, keepGap),
-            ...cleared(state),
-          };
-        }),
+        set((state) => ({
+          // Held to the same floors the cutter applies, so a slider can't be
+          // left showing a pause shorter than one it will actually produce.
+          ...clampPacing({
+            maxGap: patch.maxGap ?? state.maxGap,
+            keepGap: patch.keepGap ?? state.keepGap,
+            leadIn: patch.leadIn ?? state.leadIn,
+          }),
+          ...cleared(state),
+        })),
 
       join: async () => {
         const { files, busy, maxGap, keepGap, leadIn } = get();
@@ -163,10 +163,13 @@ export const useVoiceoverStore = create<VoiceoverState>()(
         keepGap: state.keepGap,
         leadIn: state.leadIn,
       }),
-      merge: (persisted, current) => ({
-        ...current,
-        ...((persisted ?? {}) as Partial<VoiceoverState>),
-      }),
+      merge: (persisted, current) => {
+        const saved = { ...current, ...((persisted ?? {}) as Partial<VoiceoverState>) };
+        // Settings saved before the guard existed can be below its floors, and
+        // a slider showing 0.1s when nothing under 0.5s is possible reads as a
+        // broken setting rather than a raised floor.
+        return { ...saved, ...clampPacing(saved) };
+      },
     }
   )
 );

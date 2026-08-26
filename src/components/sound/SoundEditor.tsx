@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { formatDuration } from "@/lib/editor/format";
+import { MIN_KEEP_GAP, MIN_MAX_GAP, SPEECH_GUARD } from "@/lib/editor/pacing";
 import { useVoiceoverStore } from "@/store/voiceoverStore";
 
 const AUDIO = /\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i;
@@ -197,7 +198,7 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
               </span>
               <input
                 type="range"
-                min={0.3}
+                min={MIN_MAX_GAP}
                 max={4}
                 step={0.1}
                 value={maxGap}
@@ -214,8 +215,8 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
               </span>
               <input
                 type="range"
-                min={0.1}
-                max={Math.max(0.2, maxGap)}
+                min={MIN_KEEP_GAP}
+                max={Math.max(MIN_KEEP_GAP, maxGap)}
                 step={0.05}
                 value={keepGap}
                 disabled={locked}
@@ -231,8 +232,8 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
               </span>
               <input
                 type="range"
-                min={0}
-                max={Math.max(0.05, keepGap)}
+                min={SPEECH_GUARD}
+                max={Math.max(SPEECH_GUARD, keepGap - SPEECH_GUARD)}
                 step={0.05}
                 value={leadIn}
                 disabled={locked}
@@ -253,11 +254,13 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
               rather than splitting it in two.
             </p>
             <p className="text-[11px] text-muted">
-              Speech is never touched. Silence detection calls a pause over a
-              moment <em>after</em> the word has already started, so the cut
-              stops short by the breath above and lets the real run-up back in —
-              otherwise the first consonant gets shaved off and the join sounds
-              clipped.
+              Nothing anyone said is altered, cut or shortened — only dead air
+              in the middle of a long pause. Every hole stays a quarter of a
+              second clear of the audio either side of it, and any sound long
+              enough to be part of a word is kept however quietly it was said,
+              so a soft syllable inside a pause is cut around rather than
+              through. That guard is fixed: the sliders move where the hole
+              goes, never how close to a word it gets.
             </p>
 
             <button
