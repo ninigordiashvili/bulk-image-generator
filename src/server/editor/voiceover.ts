@@ -83,6 +83,12 @@ interface Silence {
   end: number;
 }
 
+/**
+ * How far above the silence line a bridged blip has to be before it is treated
+ * as something someone said rather than as the room misbehaving.
+ */
+const ISLAND_MARGIN_DB = 6;
+
 /** 20ms of audio, which is fine enough to place a cut and coarse enough to be cheap. */
 const FRAME_SECONDS = 0.02;
 const LEVEL_RATE = 8000;
@@ -162,14 +168,10 @@ export function percentileOf(levels: number[], p: number): number {
 }
 
 /**
- * Where to draw the line between the room and the voice.
- *
  * Otsu's method: of every possible threshold, the one that leaves the quiet
- * frames and the loud frames each as tightly clustered as it can. There is no
- * constant to guess and nothing to tune — it reads whatever floor the recording
- * happens to have. Measured across takes from a -70dB floor to a -28dB one, it
- * landed between the floor and the speech every time, and found every pause at
- * its true length in all of them.
+ * frames and the loud frames each as tightly clustered as it can. Used here to
+ * separate the two populations, not as the cutting line itself — see
+ * `roomCeiling` for why the line goes somewhere else.
  */
 export function pickThreshold(levels: number[], lo = -100, hi = 0, bins = 200): number {
   const histogram = new Array<number>(bins).fill(0);
@@ -204,6 +206,45 @@ export function pickThreshold(levels: number[], lo = -100, hi = 0, bins = 200): 
 }
 
 /**
+ * The loudest the room itself ever gets.
+ *
+ * Otsu's split lands roughly midway between the room and the voice, and that is
+ * the wrong place to cut. On a take whose room sat 22dB under the speech, the
+ * midpoint was 10dB above the room — so a soft aside, or the tail of a sentence
+ * trailing off, read as silence and was removed. Measured: a 1.6s aside cut
+ * away in full.
+ *
+ * So the line goes just above the room instead. Everything below it is the room
+ * and may go; everything above it is presumed to be someone talking and is kept,
+ * however quietly they are doing it. The cost is the other direction — a room
+ * that swells above its own ceiling keeps a little of a pause — and that is the
+ * right way round to be wrong.
+ *
+ * The ceiling is a high percentile of the quiet population rather than its
+ * maximum, because the frames either side of every word sit in that population
+ * while a word is fading in or out, and the maximum would be one of those.
+ */
+export function roomCeiling(levels: number[], split: number): number {
+  const quiet = levels.filter((db) => db < split);
+  if (quiet.length === 0) return split;
+  return percentileOf(quiet, 0.97);
+}
+
+/**
+ * The level below which audio is the room and not a voice.
+ *
+ * Never above Otsu's split, so a recording with no real pauses cannot end up
+ * cutting into speech, and never within 6dB of the speech itself.
+ */
+export function silenceThreshold(levels: number[]): number {
+  const split = pickThreshold(levels);
+  const speech = percentileOf(levels, 0.95);
+  // A decibel of room to spare: the ceiling is a percentile, so a few frames
+  // sit above it by design.
+  return Math.min(roomCeiling(levels, split) + 1, split, speech - 6);
+}
+
+/**
  * The stretches of quiet, from measured levels.
  *
  * `bridge` is what keeps a pause whole. A click, a lip smack or a chair is not
@@ -218,7 +259,24 @@ export function silencesFrom(
   minimum: number,
   bridge = 0.12
 ): Silence[] {
+  return detectSilences(levels, thresholdDb, minimum, bridge).silences;
+}
+
+/**
+ * The same, plus the loud islands that were bridged over.
+ *
+ * The islands matter to the caller: bridging is what stops a click splitting a
+ * pause in two, but the click itself must survive the cut — it might be a short
+ * word rather than a chair, and the rule is that nothing anyone said is removed.
+ */
+export function detectSilences(
+  levels: number[],
+  thresholdDb: number,
+  minimum: number,
+  bridge = 0.12
+): { silences: Silence[]; islands: Silence[] } {
   const quiet = levels.map((db) => db < thresholdDb);
+  const islands: Silence[] = [];
 
   const bridgeFrames = Math.round(bridge / FRAME_SECONDS);
   for (let i = 0; i < quiet.length; ) {
@@ -231,7 +289,16 @@ export function silencesFrom(
     const isBlip = end - i <= bridgeFrames;
     const surrounded = i > 0 && quiet[i - 1] && end < quiet.length && quiet[end];
     if (isBlip && surrounded) {
+      let peak = -Infinity;
+      for (let k = i; k < end; k++) peak = Math.max(peak, levels[k]);
       for (let k = i; k < end; k++) quiet[k] = true;
+      // Only worth protecting if it could be a word. The line sits barely above
+      // the room, so room noise crosses it constantly; sparing every one of
+      // those would leave the cut in slivers and the output full of ticks.
+      // Something a person said is far louder than the room, not a hair over it.
+      if (peak > thresholdDb + ISLAND_MARGIN_DB) {
+        islands.push({ start: i * FRAME_SECONDS, end: end * FRAME_SECONDS });
+      }
     }
     i = end;
   }
@@ -249,7 +316,7 @@ export function silencesFrom(
     if (to - from >= minimum) silences.push({ start: from, end: to });
     i = end;
   }
-  return silences;
+  return { silences, islands };
 }
 
 /**
@@ -284,6 +351,35 @@ export function excessOf(
  * An `aselect` expression that drops `cuts` and keeps everything else.
  * `asetpts` afterwards closes the holes so the result plays continuously.
  */
+/**
+ * Takes the loud islands back out of the ranges to be removed.
+ *
+ * A pause with a click in it is one pause, which is why the click is bridged
+ * over when the pause is measured. But the click itself is not silence, and if
+ * it turns out to be a short word — "no", "right", a name — removing it would
+ * be cutting speech. So the cut is split around it: the quiet either side goes,
+ * the loud bit stays.
+ */
+export function keepIslands(cuts: Silence[], islands: Silence[]): Silence[] {
+  if (islands.length === 0) return cuts;
+
+  let pieces = cuts;
+  for (const island of islands) {
+    const next: Silence[] = [];
+    for (const cut of pieces) {
+      if (island.end <= cut.start || island.start >= cut.end) {
+        next.push(cut);
+        continue;
+      }
+      if (island.start > cut.start) next.push({ start: cut.start, end: island.start });
+      if (island.end < cut.end) next.push({ start: island.end, end: cut.end });
+    }
+    pieces = next;
+  }
+  // A sliver either side of an island is not worth a cut of its own.
+  return pieces.filter((piece) => piece.end - piece.start > 0.02);
+}
+
 export function selectExpression(cuts: Silence[]): string {
   if (cuts.length === 0) return "";
   const terms = cuts
@@ -341,7 +437,7 @@ export async function joinVoiceovers(
 
     const originalDuration = await probeDuration(joined, signal);
 
-    // Measured from this recording, not assumed: see pickThreshold.
+    // Measured from this recording, not assumed: see silenceThreshold.
     const levels = await frameLevels(joined, signal);
     const noiseFloorDb = percentileOf(levels, 0.05);
     const speechDb = percentileOf(levels, 0.95);
@@ -352,13 +448,13 @@ export async function joinVoiceovers(
     // became 0.9. A floor under the answer costs nothing and rules that out.
     const ceiling = speechDb - 6;
     const thresholdDb = Math.min(
-      options.thresholdDb ?? pickThreshold(levels),
+      options.thresholdDb ?? silenceThreshold(levels),
       ceiling
     );
 
     // A pause has to be at least `maxGap` to be worth reporting at all.
-    const silences: Silence[] = silencesFrom(levels, thresholdDb, options.maxGap);
-    const cuts = excessOf(silences, options);
+    const { silences, islands } = detectSilences(levels, thresholdDb, options.maxGap);
+    const cuts = keepIslands(excessOf(silences, options), islands);
     const removed = cuts.reduce((sum, cut) => sum + (cut.end - cut.start), 0);
     const select = selectExpression(cuts);
 
