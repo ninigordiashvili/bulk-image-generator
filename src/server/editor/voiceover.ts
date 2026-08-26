@@ -125,6 +125,19 @@ const ISLAND_MARGIN_DB = 6;
 const ISLAND_MIN_SECONDS = 0.06;
 
 /**
+ * How far above the floor the room is still allowed to be.
+ *
+ * Room tone measured in 20ms frames spreads a couple of dB; a room that swells —
+ * a fan cycling, traffic — maybe twice that. Six is comfortably past both and
+ * still nowhere near the twenty-odd dB that separates a room from the quietest
+ * thing a person says. See `silenceThreshold` for what goes wrong without it.
+ */
+const ROOM_SPREAD_DB = 6;
+
+/** Below this a frame is not quiet room, it is nothing at all. */
+const DIGITAL_SILENCE_DB = -90;
+
+/**
  * The shortest hole worth making.
  *
  * Below this a cut saves no meaningful time and risks a tick at the join, and
@@ -275,17 +288,71 @@ export function roomCeiling(levels: number[], split: number): number {
 }
 
 /**
+ * The frames that carry something, which are the only ones worth measuring.
+ *
+ * A take exported with a digitally silent lead-in, or joined from files with
+ * silence padded onto their ends, has frames at -120dB that are not room tone
+ * and are not a voice. Left in, they wreck the measurement rather than skew it:
+ * Otsu sees the true gap as the one between digital silence and everything
+ * else, splits there, and `roomCeiling` then measures the population of nothing
+ * at all. Measured on a take with a 2s silent head, the line came out at -119dB
+ * — under the room, so no pause was found anywhere and nothing was tightened.
+ *
+ * They need no measuring anyway: digital silence is below any line that could
+ * be drawn, so it reads as room at cutting time whatever this returns.
+ */
+function audible(levels: number[]): number[] {
+  const real = levels.filter((db) => db > DIGITAL_SILENCE_DB);
+  return real.length > 0 ? real : levels;
+}
+
+/**
+ * The quietest the recording ever really is.
+ *
+ * A low percentile, so contaminating the quiet population with soft speech
+ * cannot lift it — which is the whole reason it is worth measuring separately
+ * from the ceiling. See `silenceThreshold`.
+ */
+export function noiseFloor(levels: number[]): number {
+  return percentileOf(audible(levels), 0.05);
+}
+
+/**
  * The level below which audio is the room and not a voice.
  *
  * Never above Otsu's split, so a recording with no real pauses cannot end up
- * cutting into speech, and never within 6dB of the speech itself.
+ * cutting into speech, and never within 6dB of the speech itself — and never
+ * more than `ROOM_SPREAD_DB` above the floor the recording actually sits on,
+ * which is the one that matters and the one that was missing.
+ *
+ * `roomCeiling` measures the quiet population, and on a mostly-soft take that
+ * population is not the room: Otsu's split rises to sit between the loud speech
+ * and the soft speech, so the soft speech falls in with the room and sets the
+ * ceiling itself. Measured on a take reading at -20dB with soft passages at
+ * -40dB over a -50dB room, the line landed at -39.8dB — above the soft passages
+ * — and 3.7 of their 5 seconds were removed as dead air. Nothing downstream can
+ * catch that, because everything that protects a word keys off the word being
+ * louder than the line, and this put the line above the word.
+ *
+ * The floor is not fooled the same way: it is a low percentile, so contaminating
+ * the quiet population with soft speech cannot lift it. Room tone measured in
+ * 20ms frames spreads a couple of dB, a room that swells maybe twice that; the
+ * gap between a room and even a murmured word is far wider. So the line is held
+ * within `ROOM_SPREAD_DB` of the floor, and a room noisier than that keeps a
+ * little of its pauses instead of a voice quieter than that losing syllables.
  */
 export function silenceThreshold(levels: number[]): number {
-  const split = pickThreshold(levels);
-  const speech = percentileOf(levels, 0.95);
+  const real = audible(levels);
+  const split = pickThreshold(real);
+  const speech = percentileOf(real, 0.95);
   // A decibel of room to spare: the ceiling is a percentile, so a few frames
   // sit above it by design.
-  return Math.min(roomCeiling(levels, split) + 1, split, speech - 6);
+  return Math.min(
+    roomCeiling(real, split) + 1,
+    split,
+    speech - 6,
+    percentileOf(real, 0.05) + ROOM_SPREAD_DB
+  );
 }
 
 /**
@@ -522,8 +589,10 @@ export async function joinVoiceovers(
 
     // Measured from this recording, not assumed: see silenceThreshold.
     const levels = await frameLevels(joined, signal);
-    const noiseFloorDb = percentileOf(levels, 0.05);
-    const speechDb = percentileOf(levels, 0.95);
+    // Both measured over the audible frames, so a silent lead-in doesn't report
+    // a -120dB room and a 100dB dynamic range that isn't there.
+    const noiseFloorDb = noiseFloor(levels);
+    const speechDb = percentileOf(audible(levels), 0.95);
     // Never at or above the speech itself. Otsu will not put it there, but a
     // manual override can, and the result is not "a few pauses missed" — it is
     // the entire recording classified as silence and deleted. Measured with the
