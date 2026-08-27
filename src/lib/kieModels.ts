@@ -1,13 +1,23 @@
 import { KIE_MODELS, type KieFieldSpec, type KieModelSpec } from "@/lib/kieCatalog";
 import { CUSTOM_MODEL, type InputValue, type ModelInput } from "@/types";
+import { VERTEX_CATALOG_MODELS } from "./vertexCatalog";
 
 export type { KieFieldSpec, KieModelSpec };
 export { KIE_MODELS };
+export { isVertexModel } from "./vertexCatalog";
 
-const BY_ID = new Map(KIE_MODELS.map((model) => [model.id, model]));
+/** Both providers' models, looked up by id. */
+const BY_ID = new Map(
+  [...KIE_MODELS, ...VERTEX_CATALOG_MODELS].map((model) => [model.id, model])
+);
 
 /** First entry in the catalog — Nano Banana 2, which the ordering puts first. */
 export const DEFAULT_MODEL = KIE_MODELS[0].id;
+
+/** Every model the picker offers, both providers. */
+function allModels(): KieModelSpec[] {
+  return [...KIE_MODELS, ...VERTEX_CATALOG_MODELS];
+}
 
 export function findModel(id: string): KieModelSpec | undefined {
   return BY_ID.get(id);
@@ -16,7 +26,7 @@ export function findModel(id: string): KieModelSpec | undefined {
 /** Catalog models grouped for the picker, preserving the catalog's ordering. */
 export function groupedModels(): { group: string; models: KieModelSpec[] }[] {
   const groups: { group: string; models: KieModelSpec[] }[] = [];
-  for (const model of KIE_MODELS) {
+  for (const model of allModels()) {
     const existing = groups.find((entry) => entry.group === model.group);
     if (existing) existing.models.push(model);
     else groups.push({ group: model.group, models: [model] });

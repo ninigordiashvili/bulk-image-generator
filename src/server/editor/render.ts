@@ -382,6 +382,50 @@ export function segmentArgs(
   return args;
 }
 
+/**
+ * The concat list, with every segment's length declared rather than measured.
+ *
+ * This is the whole of the export drift. The concat demuxer places each file at
+ * the sum of the lengths of the files before it, and where a file doesn't say
+ * how long it is, it has to work it out by reading the tail and taking the last
+ * timestamp it can find. MPEG-TS carries no duration, so every segment is
+ * measured that way, and on a segment whose final packets don't yield a clean
+ * answer the estimate comes back one frame short. The next segment is then laid
+ * down 33ms early, its first frame lands on a timestamp the previous segment
+ * already used, and — because the offsets accumulate — everything from there to
+ * the end of the film moves up with it.
+ *
+ * Measured on a 16-minute export: 28,950 frames but 28,933 distinct timestamps.
+ * Seventeen of the 134 joins lost a frame each, every one of them on a
+ * segment's *first* packet, for 567ms of picture running ahead of the
+ * narration by the end. It is invisible at 0:00 and worst at the tail, which is
+ * why it reads as the avatars slipping out of sync rather than as a join fault.
+ *
+ * Nothing here needs estimating: a segment is encoded with `-frames:v frames`,
+ * so it is `frames / fps` long to the tick. Declaring that is exact, it leaves
+ * the packets untouched — this is still a stream copy — and it does not go near
+ * frame numbering, which is what broke when this was attacked from the other
+ * end (see the reverted `setts` attempt: renumbering works in decode order and
+ * H.264 does not decode in display order).
+ *
+ * Six decimals is the demuxer's own microsecond resolution. The worst rounding
+ * is half a microsecond per segment, so a thousand-segment film would still be
+ * inside a thousandth of a frame.
+ */
+export function concatList(segments: PlannedSegment[], fps: number): string {
+  return (
+    segments
+      .map(
+        (segment) =>
+          // Paths are resolved relative to the list file, so bare names are
+          // enough and nothing in the job's own directory name can need
+          // quoting. `duration` applies to the file declared above it.
+          `file '${segment.file}'\nduration ${(segment.frames / fps).toFixed(6)}`
+      )
+      .join("\n") + "\n"
+  );
+}
+
 /** The final pass: join the segments without re-encoding, lay the audio under. */
 export function muxArgs(
   listPath: string,
@@ -501,12 +545,7 @@ export async function renderJob(job: Job, request: RenderRequest): Promise<void>
     setPhase(job, "muxing", "Joining clips and adding audio…");
 
     const listPath = path.join(segmentDir, "list.txt");
-    // Paths are resolved relative to the list file, so bare names are enough
-    // and nothing in the job's own directory name can need quoting.
-    await fs.writeFile(
-      listPath,
-      segments.map((segment) => `file '${segment.file}'`).join("\n") + "\n"
-    );
+    await fs.writeFile(listPath, concatList(segments, settings.fps));
 
     const destination = outputPath(job);
     await run(
@@ -541,8 +580,13 @@ export async function renderJob(job: Job, request: RenderRequest): Promise<void>
     setPhase(job, "done", "Render complete.");
 
     // The segments are a few hundred megabytes of intermediates that nothing
-    // reads again once the MP4 exists.
-    await fs.rm(segmentDir, { recursive: true, force: true }).catch(() => {});
+    // reads again once the MP4 exists — but they are also the only way to
+    // re-run a join on real content, and join faults have not reproduced on
+    // generated sources. `KEEP_SEGMENTS=1` retries a suspect mux in seconds
+    // instead of re-rendering the film to get back to the same place.
+    if (process.env.KEEP_SEGMENTS !== "1") {
+      await fs.rm(segmentDir, { recursive: true, force: true }).catch(() => {});
+    }
   } catch (error) {
     if (job.cancelRequested) {
       setPhase(job, "cancelled", "Render cancelled.");

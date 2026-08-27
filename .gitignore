@@ -45,3 +45,6 @@ kie-accounts.json
 
 # Local runtime files — the server log from a locally-started copy.
 .local/
+
+# dev server output
+server*.log

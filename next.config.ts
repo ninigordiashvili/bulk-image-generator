@@ -6,10 +6,15 @@ const nextConfig: NextConfig = {
   // blocked as a cross-origin request. Not used by `next start`.
   allowedDevOrigins: ["192.168.100.*", "*.local"],
 
-  // Both resolve a bundled binary relative to their own directory, which only
-  // works if they're required at runtime instead of being bundled into the
-  // route handler. The video editor shells out to them for every render.
-  serverExternalPackages: ["ffmpeg-static", "ffprobe-static"],
+  // ffmpeg-static and ffprobe-static both resolve a bundled binary relative to
+  // their own directory, which only works if they're required at runtime instead
+  // of being bundled into the route handler. The video editor shells out to them
+  // for every render.
+  //
+  // @google/genai is here for the same class of reason: it finds Application
+  // Default Credentials by walking the filesystem through google-auth-library,
+  // which needs Node's real module resolution rather than a bundled copy.
+  serverExternalPackages: ["ffmpeg-static", "ffprobe-static", "@google/genai"],
 };
 
 export default nextConfig;

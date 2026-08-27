@@ -1,5 +1,7 @@
+import { isVertexModel } from "@/lib/kieModels";
 import type {
   AccountsResponse,
+  GeneratedImagePayload,
   CreditsResponse,
   GenerateRequest,
   GenerateResponse,
@@ -18,6 +20,8 @@ export async function generateImage(
   request: GenerateRequest,
   options: { signal?: AbortSignal } = {}
 ): Promise<GenerateResponse> {
+  if (isVertexModel(request.model)) return generateImageOnVertex(request, options);
+
   try {
     const response = await fetch("/api/kie/generate", {
       method: "POST",
@@ -34,6 +38,68 @@ export async function generateImage(
       return { ok: false, error: `Server returned ${response.status}.` };
     }
     return payload;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return { ok: false, error: "Cancelled." };
+    }
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Network error.",
+    };
+  }
+}
+
+/**
+ * The same call against Vertex.
+ *
+ * Kept behind `generateImage` so nothing upstream — the queue, the store, the
+ * gallery — has to know which provider ran a job. Two things are translated:
+ * the model's `input` fields, which the settings panel produces in the catalog's
+ * naming, and the response, which has no task id or credit balance because
+ * Vertex bills the cloud account directly rather than a prepaid balance.
+ */
+async function generateImageOnVertex(
+  request: GenerateRequest,
+  options: { signal?: AbortSignal } = {}
+): Promise<GenerateResponse> {
+  const input = request.input ?? {};
+  const asString = (value: unknown) =>
+    typeof value === "string" && value ? value : undefined;
+
+  try {
+    const response = await fetch("/api/vertex/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "image",
+        model: request.model,
+        prompt: request.prompt,
+        styleBible: request.styleBible,
+        aspectRatio: asString(input.aspect_ratio),
+        imageSize: asString(input.image_size),
+        count: 1,
+      }),
+      signal: options.signal,
+    });
+
+    const payload = (await response.json().catch(() => null)) as
+      | { ok: true; images: GeneratedImagePayload[] }
+      | { ok: false; error: string; retryable?: boolean }
+      | null;
+
+    if (!payload) return { ok: false, error: `Server returned ${response.status}.` };
+    if (!payload.ok) {
+      return { ok: false, error: payload.error, retryable: payload.retryable };
+    }
+
+    return {
+      ok: true,
+      // Vertex has no task id and no prepaid balance; the gallery only needs
+      // these to exist, and a wrong number would be worse than an obvious zero.
+      taskId: `vertex-${Date.now()}`,
+      images: payload.images,
+      credits: 0,
+    };
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       return { ok: false, error: "Cancelled." };
