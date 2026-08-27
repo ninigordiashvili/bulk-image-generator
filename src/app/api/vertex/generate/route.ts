@@ -6,6 +6,7 @@ import {
   vertexTarget,
 } from "@/server/vertex";
 import { findVertexImageModel, findVertexVideoModel } from "@/lib/vertexModels";
+import { VertexAccountError, findVertexAccount } from "@/server/vertexAccounts";
 import { classifyResolution, readImageDimensions } from "@/lib/imageMeta";
 
 /**
@@ -18,6 +19,8 @@ import { classifyResolution, readImageDimensions } from "@/lib/imageMeta";
 export const maxDuration = 800;
 
 interface VertexGenerateBody {
+  /** Which Google account pays. Omitted uses the first configured. */
+  accountId?: string;
   kind?: "image" | "video";
   model?: string;
   prompt?: string;
@@ -80,6 +83,16 @@ export async function POST(request: Request) {
 
   const signal = request.signal;
 
+  let account;
+  try {
+    account = await findVertexAccount(body.accountId);
+  } catch (error) {
+    return fail(
+      error instanceof VertexAccountError ? error.message : "No Vertex account.",
+      500
+    );
+  }
+
   try {
     if (kind === "video") {
       const still = body.image?.base64
@@ -87,6 +100,7 @@ export async function POST(request: Request) {
         : undefined;
 
       const videos = await generateVideo({
+        account,
         model,
         prompt,
         image: still,
@@ -102,6 +116,7 @@ export async function POST(request: Request) {
     }
 
     const images = await generateImages({
+      account,
       model,
       prompt,
       count: body.count,

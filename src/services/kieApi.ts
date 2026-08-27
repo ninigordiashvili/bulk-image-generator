@@ -72,6 +72,7 @@ async function generateImageOnVertex(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         kind: "image",
+        accountId: request.accountId,
         model: request.model,
         prompt: request.prompt,
         styleBible: request.styleBible,
@@ -200,11 +201,13 @@ export async function downloadVideoBlob(
   }
 }
 
-export async function fetchAccounts(): Promise<
-  AccountsResponse | { ok: false; error: string }
-> {
+export async function fetchAccounts(
+  provider: "kie" | "vertex" = "kie"
+): Promise<AccountsResponse | { ok: false; error: string }> {
   try {
-    const response = await fetch("/api/accounts");
+    const response = await fetch(
+      provider === "vertex" ? "/api/vertex/accounts" : "/api/accounts"
+    );
     const payload = (await response.json().catch(() => null)) as
       | AccountsResponse
       | { ok: false; error: string }

@@ -48,3 +48,7 @@ kie-accounts.json
 
 # dev server output
 server*.log
+
+# Vertex account config and credential files
+vertex-accounts.json
+vertex-*-key.json

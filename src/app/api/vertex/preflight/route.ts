@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { preflight, vertexTarget } from "@/server/vertex";
+import { VertexAccountError, findVertexAccount } from "@/server/vertexAccounts";
 import { VERTEX_IMAGE_MODELS, VERTEX_VIDEO_MODELS } from "@/lib/vertexModels";
 
 /** Each image model is tested with a real call, and they run one at a time. */
@@ -44,7 +45,17 @@ export async function GET(request: Request) {
     });
   }
 
-  const results = await preflight({
+  let account;
+  try {
+    account = await findVertexAccount(url.searchParams.get("accountId") ?? undefined);
+  } catch (error) {
+    return NextResponse.json(
+      { ok: false, error: error instanceof VertexAccountError ? error.message : "No account." },
+      { status: 500 }
+    );
+  }
+
+  const results = await preflight(account, {
     image: VERTEX_IMAGE_MODELS.map((model) => model.id),
     video: VERTEX_VIDEO_MODELS.map((model) => model.id),
   });
@@ -74,7 +85,8 @@ export async function GET(request: Request) {
 
   return NextResponse.json({
     ok: true,
-    project,
+    account: { id: account.id, label: account.label },
+    project: account.projectId,
     location,
     usableImageModels: usable,
     summary:

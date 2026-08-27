@@ -22,6 +22,7 @@ import { recordRate, type CreditRates } from "@/lib/pricing";
 import { parsePrompts, resolveCharactersForPrompt } from "@/lib/prompts";
 import { GenerationQueue } from "@/services/GenerationQueue";
 import { fetchAccounts, fetchCredits, generateImage } from "@/services/kieApi";
+import { isVertexModel } from "@/lib/kieModels";
 import {
   CUSTOM_MODEL,
   MAX_PROMPTS,
@@ -221,10 +222,19 @@ export const useGenerationStore = create<GenerationStore>()(
       creditsError: null,
 
       setSettings: (patch) => {
+        const before = isVertexModel(get().settings.model);
         set((state) => ({
           settings: reconcileSettings({ ...state.settings, ...patch }),
         }));
-        if (patch.accountId !== undefined) void get().refreshCredits();
+        // Switching between kie.ai and Vertex switches which accounts exist, so
+        // the list has to be reloaded — otherwise the picker keeps offering
+        // accounts belonging to the other provider and every job fails on a
+        // dead account id.
+        if (patch.model !== undefined && isVertexModel(get().settings.model) !== before) {
+          void get().loadAccounts();
+        } else if (patch.accountId !== undefined) {
+          void get().refreshCredits();
+        }
       },
 
       setModelInput: (field, value) => {
@@ -281,7 +291,8 @@ export const useGenerationStore = create<GenerationStore>()(
 
       loadAccounts: async () => {
         set({ accountsLoading: true, accountsError: null });
-        const result = await fetchAccounts();
+        const provider = isVertexModel(get().settings.model) ? "vertex" : "kie";
+        const result = await fetchAccounts(provider);
         if (!result.ok) {
           set({
             accountsLoading: false,
@@ -310,6 +321,12 @@ export const useGenerationStore = create<GenerationStore>()(
       },
 
       refreshCredits: async () => {
+        // Vertex bills the cloud account directly — there is no prepaid balance
+        // to fetch, and asking kie about a Vertex account id would only error.
+        if (isVertexModel(get().settings.model)) {
+          set({ credits: null });
+          return;
+        }
         const { accountId } = get().settings;
         if (!accountId) {
           set({ credits: null, creditsError: null });

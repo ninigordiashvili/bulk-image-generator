@@ -5,6 +5,7 @@ import {
   locationFor,
   requestsPerMinuteFor,
 } from "@/lib/vertexModels";
+import type { VertexAccount } from "./vertexAccounts";
 import {
   creditBudgetUsd,
   imageRate,
@@ -141,6 +142,7 @@ const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
  * same interval and departing as one burst.
  */
 async function acquire(
+  account: VertexAccount,
   model: string,
   kind: "image" | "video",
   signal?: AbortSignal
@@ -157,14 +159,21 @@ async function acquire(
 
   lane.active += 1;
 
-  // The model's own quota decides the spacing, with the env value as a ceiling
-  // so a global override can still slow everything down.
-  const qpm = Math.min(QPM, requestsPerMinuteFor(model, QPM));
+  // Quota is granted per project, so the *account* decides the rate, not the
+  // model alone — the same Veo model is 1/min on one account and 50/min on the
+  // other. The account's own figure wins where it has one; the model's is the
+  // fallback; the env value is a ceiling over both.
+  const perAccount =
+    kind === "video" ? account.videoRequestsPerMinute : account.imageRequestsPerMinute;
+  const qpm = Math.min(QPM, perAccount ?? requestsPerMinuteFor(model, QPM));
   const interval = Math.ceil(60_000 / Math.max(1, qpm));
 
+  // Keyed by account too: two accounts have separate quota pools and must not
+  // queue behind each other.
+  const rateKey = `${account.id}:${model}`;
   const now = Date.now();
-  const startAt = Math.max(now, limiter.nextStart.get(model) ?? 0);
-  limiter.nextStart.set(model, startAt + interval);
+  const startAt = Math.max(now, limiter.nextStart.get(rateKey) ?? 0);
+  limiter.nextStart.set(rateKey, startAt + interval);
 
   let released = false;
   const release = () => {
@@ -191,10 +200,10 @@ async function acquire(
 }
 
 /** Pushes one model's queue back when Vertex says its quota is spent. */
-function penalise(model: string, ms: number) {
+function penalise(rateKey: string, ms: number) {
   limiter.nextStart.set(
-    model,
-    Math.max(limiter.nextStart.get(model) ?? 0, Date.now() + ms)
+    rateKey,
+    Math.max(limiter.nextStart.get(rateKey) ?? 0, Date.now() + ms)
   );
 }
 
@@ -212,18 +221,28 @@ const clients = new Map<string, GoogleGenAI>();
  * the consumer Gemini API — it is the difference between billing this project's
  * cloud account and needing an API key, so it is not optional here.
  */
-function genai(location: string = LOCATION): GoogleGenAI {
-  if (!PROJECT) {
+function genai(account: VertexAccount, location: string): GoogleGenAI {
+  if (!account.projectId) {
     throw new VertexError(
-      "No Google Cloud project configured. Set GOOGLE_CLOUD_PROJECT in .env.local " +
-        "to the project that holds your credits.",
+      `Account "${account.id}" has no projectId.`,
       false
     );
   }
-  let client = clients.get(location);
+  const key = `${account.id}:${location}`;
+  let client = clients.get(key);
   if (!client) {
-    client = new GoogleGenAI({ vertexai: true, project: PROJECT, location });
-    clients.set(location, client);
+    client = new GoogleGenAI({
+      vertexai: true,
+      project: account.projectId,
+      location,
+      // "adc" means the machine login; anything else is a credentials file, which
+      // is what lets two Google accounts be live at once — ADC itself is
+      // singular, so the second account could not exist without this.
+      ...(account.credentials === "adc"
+        ? {}
+        : { googleAuthOptions: { keyFilename: account.credentials } }),
+    });
+    clients.set(key, client);
   }
   return client;
 }
@@ -325,6 +344,7 @@ function retryAfterMs(error: unknown): number | null {
  * that would have told them what to fix.
  */
 async function call<T>(
+  account: VertexAccount,
   model: string,
   kind: "image" | "video",
   run: () => Promise<T>,
@@ -335,7 +355,7 @@ async function call<T>(
 
   for (;;) {
     attempt += 1;
-    const release = await acquire(model, kind, signal);
+    const release = await acquire(account, model, kind, signal);
     try {
       return await run();
     } catch (error) {
@@ -359,7 +379,7 @@ async function call<T>(
       const backoff = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (attempt - 1));
       const wait = asked ?? Math.round(backoff * (0.5 + Math.random() * 0.5));
 
-      if (failure.status === 429) penalise(model, wait);
+      if (failure.status === 429) penalise(`${account.id}:${model}`, wait);
       release();
       await sleep(wait);
       continue;
@@ -380,6 +400,7 @@ async function call<T>(
  */
 export interface UsageEntry {
   at: number;
+  accountId: string;
   model: string;
   kind: "image" | "video";
   /** Images generated, or seconds of video. */
@@ -426,9 +447,24 @@ export function usageSummary() {
     byModel.set(entry.model, row);
   }
 
+  // Grouped by account as well as by model: with two Google accounts the only
+  // number that matters when choosing one is what is left on *that* account.
+  const byAccount = new Map<string, { usd: number; calls: number }>();
+  for (const entry of ledger.entries) {
+    const row = byAccount.get(entry.accountId) ?? { usd: 0, calls: 0 };
+    row.usd += entry.usd;
+    row.calls += 1;
+    byAccount.set(entry.accountId, row);
+  }
+
   return {
     since: ledger.since,
     spentUsd: Number(spent.toFixed(4)),
+    byAccount: [...byAccount.entries()].map(([accountId, row]) => ({
+      accountId,
+      calls: row.calls,
+      usd: Number(row.usd.toFixed(4)),
+    })),
     creditBudgetUsd: budget,
     remainingUsd: Number(Math.max(0, budget - spent).toFixed(4)),
     spendCapUsd: cap,
@@ -460,9 +496,16 @@ export function usageSummary() {
  * Checked before the request rather than after, because after is too late — the
  * point of a cap is that the run stops on its own during an unattended bulk job.
  */
-function noteSpend(model: string, kind: "image" | "video", units: number, rate: Rate) {
+function noteSpend(
+  accountId: string,
+  model: string,
+  kind: "image" | "video",
+  units: number,
+  rate: Rate
+) {
   record({
     at: Date.now(),
+    accountId,
     model,
     kind,
     units,
@@ -491,6 +534,7 @@ export interface VertexImage {
 }
 
 export interface ImageRequest {
+  account: VertexAccount;
   model: string;
   prompt: string;
   count?: number;
@@ -515,7 +559,7 @@ export interface ImageRequest {
  * one image per call, sized and shaped by `imageConfig`.
  */
 export async function generateImages(request: ImageRequest): Promise<VertexImage[]> {
-  const { model, prompt, count = 1, aspectRatio, imageSize, signal } = request;
+  const { account, model, prompt, count = 1, aspectRatio, imageSize, signal } = request;
   const spec = findVertexImageModel(model);
   const wanted = Math.max(1, Math.min(spec?.maxImages ?? 4, count));
   const rate = imageRate(model);
@@ -533,10 +577,11 @@ export async function generateImages(request: ImageRequest): Promise<VertexImage
     guardSpend(rate.usd);
 
     const response = await call(
+      account,
       model,
       "image",
       () =>
-        genai(location).models.generateContent({
+        genai(account, location).models.generateContent({
           model,
           contents: prompt,
           config: {
@@ -565,13 +610,14 @@ export async function generateImages(request: ImageRequest): Promise<VertexImage
       base64: inline.inlineData.data,
       mimeType: inline.inlineData.mimeType ?? "image/png",
     });
-    noteSpend(model, "image", 1, rate);
+    noteSpend(account.id, model, "image", 1, rate);
   }
 
   return images;
 }
 
 export interface VideoRequest {
+  account: VertexAccount;
   model: string;
   prompt: string;
   /** Base64 still to animate, for the image-to-video models. */
@@ -607,6 +653,7 @@ export interface VertexVideo {
  */
 export async function generateVideo(request: VideoRequest): Promise<VertexVideo[]> {
   const {
+    account,
     model,
     prompt,
     image,
@@ -644,10 +691,11 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
   const location = locationOf(model);
 
   let operation = await call(
+    account,
     model,
     "video",
     () =>
-      genai(location).models.generateVideos({
+      genai(account, location).models.generateVideos({
         model,
         prompt,
         ...(image ? { image: { imageBytes: image.base64, mimeType: image.mimeType } } : {}),
@@ -670,7 +718,7 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
     }
     await sleep(VIDEO_POLL_MS);
     try {
-      operation = await genai(location).operations.getVideosOperation({ operation });
+      operation = await genai(account, location).operations.getVideosOperation({ operation });
     } catch (error) {
       throw classify(error);
     }
@@ -695,7 +743,7 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
     throw new VertexError("Veo finished but returned no video.", false);
   }
 
-  noteSpend(model, "video", seconds * videos.length, rate);
+  noteSpend(account.id, model, "video", seconds * videos.length, rate);
   return videos;
 }
 
@@ -720,15 +768,15 @@ export interface ModelProbe {
  * and costs a fraction of a cent. Video is not: a Veo call that succeeds bills
  * for a whole clip, so video is reported as `unknown` rather than started.
  */
-export async function preflight(models: {
-  image: string[];
-  video: string[];
-}): Promise<ModelProbe[]> {
+export async function preflight(
+  account: VertexAccount,
+  models: { image: string[]; video: string[] }
+): Promise<ModelProbe[]> {
   const out: ModelProbe[] = [];
 
   for (const model of models.image) {
     try {
-      await generateImages({ model, prompt: "a plain red square", count: 1 });
+      await generateImages({ account, model, prompt: "a plain red square", count: 1 });
       out.push({ model, kind: "image", available: true, detail: "generated a test image" });
     } catch (error) {
       const failure = error instanceof VertexError ? error : classify(error);
