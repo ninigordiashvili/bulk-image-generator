@@ -14,19 +14,29 @@ const BY_ID = new Map(
 /** First entry in the catalog — Nano Banana 2, which the ordering puts first. */
 export const DEFAULT_MODEL = KIE_MODELS[0].id;
 
-/** Every model the picker offers, both providers. */
-function allModels(): KieModelSpec[] {
-  return [...KIE_MODELS, ...VERTEX_CATALOG_MODELS];
+/** The model a provider starts on when the current one belongs to the other. */
+export function defaultModelFor(provider: "kie" | "vertex"): string {
+  return provider === "vertex" ? VERTEX_CATALOG_MODELS[0].id : DEFAULT_MODEL;
 }
 
 export function findModel(id: string): KieModelSpec | undefined {
   return BY_ID.get(id);
 }
 
-/** Catalog models grouped for the picker, preserving the catalog's ordering. */
-export function groupedModels(): { group: string; models: KieModelSpec[] }[] {
+/**
+ * Models for the picker, grouped, limited to one provider's catalog. The
+ * account chosen upstream decides which — offering a kie model while a Vertex
+ * account is selected would only produce a job that cannot run.
+ */
+export function groupedModels(
+  provider: "kie" | "vertex" = "kie"
+): { group: string; models: KieModelSpec[] }[] {
   const groups: { group: string; models: KieModelSpec[] }[] = [];
-  for (const model of allModels()) {
+  const pool =
+    provider === "vertex"
+      ? VERTEX_CATALOG_MODELS
+      : KIE_MODELS;
+  for (const model of pool) {
     const existing = groups.find((entry) => entry.group === model.group);
     if (existing) existing.models.push(model);
     else groups.push({ group: model.group, models: [model] });

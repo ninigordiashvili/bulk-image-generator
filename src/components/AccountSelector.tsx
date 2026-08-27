@@ -10,6 +10,7 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
   const accountsError = useGenerationStore((state) => state.accountsError);
   const accountsLoading = useGenerationStore((state) => state.accountsLoading);
   const accountId = useGenerationStore((state) => state.settings.accountId);
+  const provider = useGenerationStore((state) => state.settings.provider);
   const credits = useGenerationStore((state) => state.credits);
   const creditsError = useGenerationStore((state) => state.creditsError);
   const setSettings = useGenerationStore((state) => state.setSettings);
@@ -20,37 +21,73 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
     void loadAccounts();
   }, [loadAccounts]);
 
-  const selected = accounts.find((account) => account.id === accountId);
+  // Matched on provider too: both providers have an account called "main".
+  const selected = accounts.find(
+    (account) => account.id === accountId && account.provider === provider
+  );
+  const kieAccounts = accounts.filter((account) => account.provider !== "vertex");
+  const vertexAccounts = accounts.filter((account) => account.provider === "vertex");
+  const isVertex = provider === "vertex";
 
   return (
     <section className="panel">
       <div className="mb-3 flex items-baseline justify-between gap-2">
-        <h2 className="panel-title mb-0">kie.ai account</h2>
+        <h2 className="panel-title mb-0">Account</h2>
         {selected && (
           <span className="font-mono text-[11px] text-muted">{selected.keyHint}</span>
         )}
       </div>
 
+      {/* The value is provider-qualified because an id alone is ambiguous —
+          both providers ship an account called "main". Choosing here is what
+          selects the provider; the model list downstream follows it. */}
       <select
         className="field"
-        value={accountId}
+        value={`${provider}:${accountId}`}
         disabled={disabled || accountsLoading || accounts.length === 0}
-        onChange={(event) => setSettings({ accountId: event.target.value })}
+        onChange={(event) => {
+          const [nextProvider, ...rest] = event.target.value.split(":");
+          setSettings({
+            provider: nextProvider === "vertex" ? "vertex" : "kie",
+            accountId: rest.join(":"),
+          });
+        }}
       >
         {accounts.length === 0 && (
           <option value="">
             {accountsLoading ? "Loading accounts…" : "No usable accounts"}
           </option>
         )}
-        {accounts.map((account) => (
-          <option key={account.id} value={account.id}>
-            {account.label}
-          </option>
-        ))}
+        {kieAccounts.length > 0 && (
+          <optgroup label="kie.ai">
+            {kieAccounts.map((account) => (
+              <option key={`kie:${account.id}`} value={`kie:${account.id}`}>
+                {account.label}
+              </option>
+            ))}
+          </optgroup>
+        )}
+        {vertexAccounts.length > 0 && (
+          <optgroup label="Vertex AI (Google Cloud)">
+            {vertexAccounts.map((account) => (
+              <option key={`vertex:${account.id}`} value={`vertex:${account.id}`}>
+                {account.label}
+              </option>
+            ))}
+          </optgroup>
+        )}
       </select>
 
-      {/* The balance is the only hard limit on a batch, so it leads. */}
-      {selected && (
+      {/* The balance is the only hard limit on a kie batch, so it leads. Vertex
+          bills the cloud account directly and publishes no balance API, so the
+          quota — the thing that actually paces a Vertex run — is shown instead. */}
+      {selected && isVertex && (
+        <p className="mt-2 text-xs text-muted">
+          Rate limits{" "}
+          <span className="font-semibold text-foreground">{selected.keyHint}</span>
+        </p>
+      )}
+      {selected && !isVertex && (
         <p className="mt-2 text-xs">
           {credits === null ? (
             creditsError ? (
@@ -91,8 +128,19 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
 
       {!accountsError && accountProblems.length === 0 && (
         <p className="mt-2 text-xs text-muted">
-          Keys stay in <code className="text-foreground">kie-accounts.json</code> on
-          the server — each account spends its own credit balance.
+          {isVertex ? (
+            <>
+              Credentials stay in{" "}
+              <code className="text-foreground">vertex-accounts.json</code> on the
+              server — each account spends its own Google Cloud credit, and quota
+              is granted per project, so the account decides the speed.
+            </>
+          ) : (
+            <>
+              Keys stay in <code className="text-foreground">kie-accounts.json</code>{" "}
+              on the server — each account spends its own credit balance.
+            </>
+          )}
         </p>
       )}
 
@@ -109,7 +157,7 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
           type="button"
           className="btn-ghost text-xs"
           onClick={() => void refreshCredits()}
-          disabled={!accountId}
+          disabled={!accountId || isVertex}
         >
           Refresh balance
         </button>

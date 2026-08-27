@@ -22,7 +22,7 @@ import { recordRate, type CreditRates } from "@/lib/pricing";
 import { parsePrompts, resolveCharactersForPrompt } from "@/lib/prompts";
 import { GenerationQueue } from "@/services/GenerationQueue";
 import { fetchAccounts, fetchCredits, generateImage } from "@/services/kieApi";
-import { isVertexModel } from "@/lib/kieModels";
+import { defaultModelFor } from "@/lib/kieModels";
 import {
   CUSTOM_MODEL,
   MAX_PROMPTS,
@@ -100,6 +100,7 @@ interface GenerationStore {
 let queue: GenerationQueue | null = null;
 
 const DEFAULT_SETTINGS: GenerationSettings = {
+  provider: "kie",
   accountId: "",
   model: DEFAULT_MODEL,
   modelInputs: {},
@@ -222,17 +223,17 @@ export const useGenerationStore = create<GenerationStore>()(
       creditsError: null,
 
       setSettings: (patch) => {
-        const before = isVertexModel(get().settings.model);
-        set((state) => ({
-          settings: reconcileSettings({ ...state.settings, ...patch }),
-        }));
-        // Switching between kie.ai and Vertex switches which accounts exist, so
-        // the list has to be reloaded — otherwise the picker keeps offering
-        // accounts belonging to the other provider and every job fails on a
-        // dead account id.
-        if (patch.model !== undefined && isVertexModel(get().settings.model) !== before) {
-          void get().loadAccounts();
-        } else if (patch.accountId !== undefined) {
+        set((state) => {
+          const next = { ...state.settings, ...patch };
+          // Choosing an account from the other provider carries the model with
+          // it: the previous model belongs to a catalog this account cannot
+          // reach, so it is replaced rather than left to fail at submit time.
+          if (patch.provider !== undefined && patch.provider !== state.settings.provider) {
+            next.model = defaultModelFor(patch.provider);
+          }
+          return { settings: reconcileSettings(next) };
+        });
+        if (patch.accountId !== undefined || patch.provider !== undefined) {
           void get().refreshCredits();
         }
       },
@@ -291,8 +292,29 @@ export const useGenerationStore = create<GenerationStore>()(
 
       loadAccounts: async () => {
         set({ accountsLoading: true, accountsError: null });
-        const provider = isVertexModel(get().settings.model) ? "vertex" : "kie";
-        const result = await fetchAccounts(provider);
+        // Both providers are listed together so the picker is the one place a
+        // provider is chosen. A failure on one side must not hide the other:
+        // Vertex being unconfigured should still leave kie.ai usable.
+        const [kie, vertex] = await Promise.all([
+          fetchAccounts("kie"),
+          fetchAccounts("vertex"),
+        ]);
+        const merged = [
+          ...(kie.ok ? kie.accounts.map((a) => ({ ...a, provider: "kie" as const })) : []),
+          ...(vertex.ok
+            ? vertex.accounts.map((a) => ({ ...a, provider: "vertex" as const }))
+            : []),
+        ];
+        const result = merged.length
+          ? {
+              ok: true as const,
+              accounts: merged,
+              problems: [
+                ...(kie.ok ? kie.problems : []),
+                ...(vertex.ok ? vertex.problems : []),
+              ],
+            }
+          : { ok: false as const, error: (!kie.ok && kie.error) || (!vertex.ok && vertex.error) || "No accounts configured." };
         if (!result.ok) {
           set({
             accountsLoading: false,
@@ -306,16 +328,22 @@ export const useGenerationStore = create<GenerationStore>()(
         // Keep the persisted selection if it's still usable, else fall back to the
         // first usable one — or clear it, so the UI can't submit a dead account id.
         const previous = get().settings;
-        const stillValid = result.accounts.some((a) => a.id === previous.accountId);
-        const accountId = stillValid
-          ? previous.accountId
-          : (result.accounts[0]?.id ?? "");
+        // Matched on provider as well as id: both providers have an account
+        // called "main", so an id alone would silently keep the wrong one.
+        const stillValid = result.accounts.some(
+          (a) => a.id === previous.accountId && a.provider === previous.provider
+        );
+        const fallback = result.accounts[0];
+        const provider = stillValid ? previous.provider : (fallback?.provider ?? "kie");
+        const accountId = stillValid ? previous.accountId : (fallback?.id ?? "");
+        const model =
+          provider === previous.provider ? previous.model : defaultModelFor(provider);
 
         set({
           accounts: result.accounts,
           accountProblems: result.problems,
           accountsLoading: false,
-          settings: reconcileSettings({ ...previous, accountId }),
+          settings: reconcileSettings({ ...previous, provider, accountId, model }),
         });
         void get().refreshCredits();
       },
@@ -323,7 +351,7 @@ export const useGenerationStore = create<GenerationStore>()(
       refreshCredits: async () => {
         // Vertex bills the cloud account directly — there is no prepaid balance
         // to fetch, and asking kie about a Vertex account id would only error.
-        if (isVertexModel(get().settings.model)) {
+        if (get().settings.provider === "vertex") {
           set({ credits: null });
           return;
         }
@@ -388,7 +416,8 @@ export const useGenerationStore = create<GenerationStore>()(
 
             const response = await generateImage(
               {
-                accountId: current.accountId,
+                provider: current.provider,
+              accountId: current.accountId,
                 model,
                 prompt: job.prompt,
                 styleBible: current.styleBible,

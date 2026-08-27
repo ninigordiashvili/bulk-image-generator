@@ -16,10 +16,15 @@ export type TaskInput = Record<string, InputValue | string[]>;
  * Client-safe view of a kie.ai account. The API key never leaves the server;
  * `keyHint` is the last four characters, enough to tell two keys apart.
  */
+/** Which backend an account belongs to. */
+export type Provider = "kie" | "vertex";
+
 export interface KieAccount {
   id: string;
   label: string;
   keyHint: string;
+  /** Set when the account list is merged in the store; absent from the wire. */
+  provider?: Provider;
   /** Where the key came from — `env` accounts aren't in the JSON file. */
   source: "file" | "env";
 }
@@ -73,6 +78,12 @@ export interface CharacterRef {
 export const CUSTOM_MODEL = "__custom__";
 
 export interface GenerationSettings {
+  /**
+   * Chosen by picking an account, not by picking a model. The account is the
+   * thing that holds the credit and the quota, so it decides which models are
+   * even offered — the reverse felt backwards to use.
+   */
+  provider: Provider;
   accountId: string;
   /** A catalog model id, or CUSTOM_MODEL. */
   model: string;
@@ -201,6 +212,7 @@ export interface QueueProgress {
 
 /** POST /api/kie/generate request body. */
 export interface GenerateRequest {
+  provider: Provider;
   accountId: string;
   /** The literal kie model id, already resolved from CUSTOM_MODEL if needed. */
   model: string;

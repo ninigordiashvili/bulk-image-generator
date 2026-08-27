@@ -168,7 +168,7 @@ export function GenerationSettingsPanel({ disabled }: { disabled: boolean }) {
           disabled={disabled}
           onChange={(event) => setSettings({ model: event.target.value })}
         >
-          {groupedModels().map(({ group, models }) => (
+          {groupedModels(settings.provider).map(({ group, models }) => (
             <optgroup key={group} label={group}>
               {models.map((model) => (
                 <option key={model.id} value={model.id}>
@@ -177,9 +177,14 @@ export function GenerationSettingsPanel({ disabled }: { disabled: boolean }) {
               ))}
             </optgroup>
           ))}
-          <optgroup label="Other">
-            <option value={CUSTOM_MODEL}>Custom model id…</option>
-          </optgroup>
+          {/* kie.ai only: it accepts a raw `input` object for any model it
+              serves. Vertex has no equivalent passthrough, so offering it under
+              a Vertex account would just be a job that cannot run. */}
+          {settings.provider === "kie" && (
+            <optgroup label="Other">
+              <option value={CUSTOM_MODEL}>Custom model id…</option>
+            </optgroup>
+          )}
         </select>
 
         {spec && (

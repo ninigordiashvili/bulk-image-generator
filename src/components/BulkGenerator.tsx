@@ -150,7 +150,7 @@ export function BulkGenerator() {
 
                 {!accountId && (
                   <span className="text-xs text-amber-400">
-                    Select a kie.ai account first.
+                    Select an account first.
                   </span>
                 )}
 

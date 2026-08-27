@@ -1,4 +1,3 @@
-import { isVertexModel } from "@/lib/kieModels";
 import type {
   AccountsResponse,
   GeneratedImagePayload,
@@ -20,7 +19,7 @@ export async function generateImage(
   request: GenerateRequest,
   options: { signal?: AbortSignal } = {}
 ): Promise<GenerateResponse> {
-  if (isVertexModel(request.model)) return generateImageOnVertex(request, options);
+  if (request.provider === "vertex") return generateImageOnVertex(request, options);
 
   try {
     const response = await fetch("/api/kie/generate", {
