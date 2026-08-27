@@ -2,7 +2,8 @@
 
 import Image from "next/image";
 import { useState } from "react";
-import { VIDEO_MODELS, isAudioDriven, videoModel } from "@/lib/videoModels";
+import { isAudioDriven, videoModel, videoModelsFor } from "@/lib/videoModels";
+import { useGenerationStore } from "@/store/generationStore";
 import { formatTime } from "@/lib/editor/format";
 import { creditsPerImage, formatCredits } from "@/lib/pricing";
 import { shotSize, useVideoStore } from "@/store/videoStore";
@@ -29,6 +30,8 @@ export function VideoShotRow({
   job?: GenerationJob;
   disabled: boolean;
 }) {
+  // Same account, same providers as the Images tab.
+  const provider = useGenerationStore((state) => state.settings.provider);
   const updateShot = useVideoStore((state) => state.updateShot);
   const removeShot = useVideoStore((state) => state.removeShot);
   const retryJob = useVideoStore((state) => state.retryJob);
@@ -92,7 +95,7 @@ export function VideoShotRow({
               disabled={disabled}
               onChange={(event) => updateShot(shot.id, { model: event.target.value })}
             >
-              {VIDEO_MODELS.map((model) => (
+              {videoModelsFor(provider).map((model) => (
                 <option key={model.id} value={model.id}>
                   {model.label}
                 </option>

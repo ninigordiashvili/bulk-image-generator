@@ -13,7 +13,7 @@
  */
 
 /** Which kie API a model is reached through — they poll differently too. */
-export type VideoApi = "veo" | "jobs";
+export type VideoApi = "veo" | "jobs" | "vertex";
 
 /**
  * What supplies the clip's content and length.
@@ -29,6 +29,12 @@ export interface VideoModelSpec {
   id: string;
   label: string;
   api: VideoApi;
+  /**
+   * Which account pays. Both providers serve a model called "Veo 3.1 Lite" and
+   * they are not the same thing — one bills kie.ai credits, the other Google
+   * Cloud — so the picker must never show them together.
+   */
+  provider: "kie" | "vertex";
   input: VideoInput;
   /** Model string sent in the request body. */
   requestModel: string;
@@ -58,6 +64,7 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     id: "veo3_lite",
     label: "Veo 3.1 Lite",
     api: "veo",
+    provider: "kie",
     input: "prompt",
     requestModel: "veo3_lite",
     docUrl: "https://docs.kie.ai/veo3-api/generate-veo-3-video",
@@ -73,6 +80,7 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     id: "grok-imagine/image-to-video",
     label: "Grok Image-to-Video",
     api: "jobs",
+    provider: "kie",
     input: "prompt",
     requestModel: "grok-imagine/image-to-video",
     docUrl: "https://docs.kie.ai/market/grok-imagine/image-to-video",
@@ -90,6 +98,7 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     id: "kling/ai-avatar-standard",
     label: "Kling AI Avatar (Standard)",
     api: "jobs",
+    provider: "kie",
     input: "audio",
     requestModel: "kling/ai-avatar-standard",
     docUrl: "https://docs.kie.ai/market/kling/ai-avatar-standard",
@@ -106,6 +115,7 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     id: "kling/ai-avatar-pro",
     label: "Kling AI Avatar (Pro)",
     api: "jobs",
+    provider: "kie",
     input: "audio",
     requestModel: "kling/ai-avatar-pro",
     docUrl: "https://docs.kie.ai/market/kling/ai-avatar-pro",
@@ -118,9 +128,42 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     maxAudioSeconds: 300,
     blurb: "The same avatar model at higher fidelity, for more credits per second.",
   },
+  {
+    id: "vertex:veo-3.1-lite-generate-001",
+    label: "Veo 3.1 Lite (Vertex)",
+    api: "vertex",
+    provider: "vertex",
+    input: "prompt",
+    requestModel: "veo-3.1-lite-generate-001",
+    docUrl: "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+    // Veo named these itself when it rejected an out-of-range request.
+    durations: [4, 6, 8],
+    defaultDuration: 8,
+    // kie's Veo offers 4k; Vertex did not accept it here, so it is left out
+    // rather than shown and then rejected after a minute of waiting.
+    resolutions: ["720p", "1080p"],
+    defaultResolution: "720p",
+    aspectRatios: ["16:9", "9:16"],
+    defaultAspectRatio: "16:9",
+    blurb:
+      "Google Veo 3.1 Lite billed to your Google Cloud credits. Silent by " +
+      "default — the editor lays your own narration under.",
+  },
 ];
 
 const BY_ID = new Map(VIDEO_MODELS.map((model) => [model.id, model]));
+
+/** The models one provider's account can actually run. */
+export function videoModelsFor(
+  provider: "kie" | "vertex"
+): readonly VideoModelSpec[] {
+  return VIDEO_MODELS.filter((model) => model.provider === provider);
+}
+
+/** The model a provider falls back to when the current one is the other's. */
+export function defaultVideoModelFor(provider: "kie" | "vertex"): string {
+  return videoModelsFor(provider)[0]?.id ?? DEFAULT_VIDEO_MODEL;
+}
 
 export const DEFAULT_VIDEO_MODEL = VIDEO_MODELS[0].id;
 

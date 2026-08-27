@@ -111,6 +111,62 @@ async function generateImageOnVertex(
   }
 }
 
+/**
+ * Vertex video: one request, awaited.
+ *
+ * Not start-then-poll like kie. Vertex runs the clip as a long-running
+ * operation which the server already waits out, so there is no task id to hand
+ * back and nothing for the client to poll. The trade-off is that a lost
+ * connection loses the wait — but not the clip, which Vertex still bills and
+ * still finishes, so this must never be retried blindly.
+ */
+export async function generateVideoOnVertex(
+  request: {
+    accountId: string;
+    model: string;
+    prompt: string;
+    image?: { base64: string; mimeType: string };
+    durationSeconds?: number;
+    resolution?: string;
+    aspectRatio?: string;
+    generateAudio?: boolean;
+  },
+  options: { signal?: AbortSignal } = {}
+): Promise<
+  | { ok: true; base64?: string; uri?: string; mimeType: string }
+  | { ok: false; error: string; retryable?: boolean }
+> {
+  try {
+    const response = await fetch("/api/vertex/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "video", ...request }),
+      signal: options.signal,
+    });
+    const payload = (await response.json().catch(() => null)) as
+      | { ok: true; videos: { base64?: string; uri?: string; mimeType: string }[] }
+      | { ok: false; error: string; retryable?: boolean }
+      | null;
+
+    if (!payload) return { ok: false, error: `Server returned ${response.status}.` };
+    if (!payload.ok) {
+      return { ok: false, error: payload.error, retryable: payload.retryable };
+    }
+    const video = payload.videos[0];
+    if (!video) return { ok: false, error: "Vertex returned no video.", retryable: false };
+    return { ok: true, base64: video.base64, uri: video.uri, mimeType: video.mimeType };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return { ok: false, error: "Cancelled.", retryable: false };
+    }
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Network error.",
+      retryable: true,
+    };
+  }
+}
+
 /** Creates the kie task and returns immediately with its id. */
 export async function startVideo(
   request: VideoStartRequest,

@@ -27,7 +27,12 @@ import {
   videoModel,
 } from "@/lib/videoModels";
 import { GenerationQueue } from "@/services/GenerationQueue";
-import { downloadVideoBlob, pollVideo, startVideo } from "@/services/kieApi";
+import {
+  downloadVideoBlob,
+  generateVideoOnVertex,
+  pollVideo,
+  startVideo,
+} from "@/services/kieApi";
 import { useGenerationStore } from "@/store/generationStore";
 import {
   MAX_SHOTS,
@@ -474,6 +479,96 @@ export const useVideoStore = create<VideoStore>()(
             }
 
             const spec = videoModel(shot.model);
+            const provider = useGenerationStore.getState().settings.provider;
+
+            if (spec.provider !== provider) {
+              return {
+                ok: false,
+                error: `${spec.label} needs a ${spec.provider} account, but a ${provider} one is selected.`,
+                retryable: false,
+              };
+            }
+
+            // Vertex has no task id to resume from: the server waits the whole
+            // operation out and hands back bytes. That means an interrupted
+            // attempt cannot be rejoined — the clip still finishes and is still
+            // billed, so this path is marked non-retryable on failure rather
+            // than silently paying for a second render.
+            if (spec.api === "vertex") {
+              const made = await generateVideoOnVertex(
+                {
+                  accountId,
+                  model: spec.requestModel,
+                  prompt: stripCueLines(shot.prompt),
+                  image: {
+                    base64: shot.image.base64,
+                    mimeType: shot.image.mimeType,
+                  },
+                  durationSeconds: shot.duration,
+                  resolution: shot.resolution,
+                  aspectRatio: shot.aspectRatio,
+                  // The editor lays the user's own narration under every clip,
+                  // so a generated soundtrack would only be stripped later —
+                  // and silent is the cheaper rate.
+                  generateAudio: false,
+                },
+                { signal }
+              );
+              if (!made.ok) {
+                return { ok: false, error: made.error, retryable: made.retryable };
+              }
+
+              const blob = made.base64
+                ? new Blob([Uint8Array.from(atob(made.base64), (c) => c.charCodeAt(0))], {
+                    type: made.mimeType,
+                  })
+                : null;
+              if (!blob) {
+                return {
+                  ok: false,
+                  error:
+                    "Vertex wrote the clip to Cloud Storage instead of returning " +
+                    "bytes. Clear outputGcsUri to get it inline.",
+                  retryable: false,
+                };
+              }
+
+              const video: GeneratedVideo = {
+                id: `${shot.id}@${Date.now()}`,
+                shotId: shot.id,
+                prompt: stripCueLines(shot.prompt),
+                tag: shotTag(shot),
+                model: shot.model,
+                modelLabel: spec.label,
+                mimeType: blob.type || "video/mp4",
+                blob,
+                sizeBytes: blob.size,
+                duration: shot.duration,
+                resolution: shot.resolution,
+                aspectRatio: shot.aspectRatio,
+                posterBase64: shot.image.base64,
+                posterMimeType: shot.image.mimeType,
+                batchId,
+                batchCreatedAt,
+                promptIndex: job.promptIndex,
+                createdAt: Date.now(),
+                // Vertex bills Google Cloud, not a kie credit balance. Zero here
+                // means "not a kie cost", not "free" — the dollar figure lives
+                // at /api/vertex/usage.
+                credits: 0,
+                creditsEstimated: true,
+                // Vertex returns bytes rather than hosting the clip, so there is
+                // no task to resume and no URL that expires.
+                taskId: "",
+                sourceUrl: "",
+              };
+
+              set((state) => ({ videos: insertVideos(state.videos, video) }));
+              void putVideo(video).catch(() => {
+                /* persistence is best-effort; the clip is already in memory */
+              });
+              return { ok: true };
+            }
 
             // Resume rather than restart. A shot that already has a task id was
             // paid for on a previous attempt — re-creating it would bill a

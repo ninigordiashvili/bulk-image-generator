@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ZipProgress } from "@/lib/download";
 import { KIE_MODELS } from "@/lib/kieModels";
 import { parsePrompts } from "@/lib/prompts";
-import { VIDEO_MODELS } from "@/lib/videoModels";
+import { videoModelsFor } from "@/lib/videoModels";
 import {
   activeModelId,
   isRunning,
@@ -65,8 +65,9 @@ export function BulkGenerator() {
         <div>
           <h1 className="text-xl font-semibold">Bulk AI Generator</h1>
           <p className="mt-1 text-xs text-muted">
-            kie.ai · {KIE_MODELS.length} image models + {VIDEO_MODELS.length} video
-            models — everything runs locally against your own kie.ai credits.
+            {KIE_MODELS.length} kie.ai image models + {videoModelsFor("kie").length}{" "}
+            video, plus Vertex AI on your Google Cloud credits — everything runs
+            locally. The account you pick decides which models are offered.
           </p>
         </div>
 

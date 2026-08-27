@@ -4,7 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { loadShotImage } from "@/lib/imageFile";
 import { formatTime } from "@/lib/editor/format";
 import { creditsPerImage, formatCredits, formatUsd, creditsToUsd } from "@/lib/pricing";
-import { VIDEO_MODELS, isAudioDriven, videoModel } from "@/lib/videoModels";
+import {
+  defaultVideoModelFor,
+  isAudioDriven,
+  videoModel,
+  videoModelsFor,
+} from "@/lib/videoModels";
 import { isRunning, useGenerationStore } from "@/store/generationStore";
 import { isRunnable, shotSize, useVideoStore } from "@/store/videoStore";
 import { MAX_CONCURRENCY, MAX_SHOTS } from "@/types";
@@ -14,6 +19,8 @@ import { VideoShotRow } from "./VideoShotRow";
 export function VideoBatch() {
   const shots = useVideoStore((state) => state.shots);
   const defaults = useVideoStore((state) => state.defaults);
+  const setDefaults = useVideoStore((state) => state.setDefaults);
+  const updateShot = useVideoStore((state) => state.updateShot);
   const jobs = useVideoStore((state) => state.jobs);
   const progress = useVideoStore((state) => state.progress);
   const queueState = useVideoStore((state) => state.queueState);
@@ -47,6 +54,24 @@ export function VideoBatch() {
   const hydrateGallery = useVideoStore((state) => state.hydrateGallery);
 
   const accountId = useGenerationStore((state) => state.settings.accountId);
+  // The account chosen on the Images tab decides which video models can run.
+  const provider = useGenerationStore((state) => state.settings.provider);
+
+  // Switching account provider strands every row on a model the new account
+  // cannot reach — the row's dropdown no longer lists it, so it renders blank
+  // and the run fails at submit. Moving them to the new provider's default is
+  // the only outcome that leaves the batch usable.
+  useEffect(() => {
+    const fallback = defaultVideoModelFor(provider);
+    if (videoModel(defaults.model).provider !== provider) {
+      setDefaults({ model: fallback });
+    }
+    for (const shot of shots) {
+      if (videoModel(shot.model).provider !== provider) {
+        updateShot(shot.id, { model: fallback });
+      }
+    }
+  }, [provider, defaults.model, shots, setDefaults, updateShot]);
   const credits = useGenerationStore((state) => state.credits);
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -251,7 +276,7 @@ export function VideoBatch() {
             {/* Setting ten rows by hand is the tedious part; this is the shortcut. */}
             <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2">
               <span className="text-[11px] text-muted">Apply to all rows:</span>
-              {VIDEO_MODELS.map((model) => (
+              {videoModelsFor(provider).map((model) => (
                 <button
                   key={model.id}
                   type="button"
