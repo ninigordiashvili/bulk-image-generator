@@ -412,12 +412,26 @@ export interface UsageEntry {
 interface Ledger {
   entries: UsageEntry[];
   since: number;
+  /**
+   * Money committed by calls that have started but not yet recorded. Without
+   * this the cap only sees *finished* work, so N concurrent calls each check
+   * against the same total and all pass — the ceiling is then overshot by
+   * roughly one call per lane, which grows with concurrency exactly when the
+   * cap matters most.
+   */
+  reserved: number;
 }
 
 const ledger: Ledger = ((globalThis as { __vertexLedger?: Ledger }).__vertexLedger ??= {
   entries: [],
   since: Date.now(),
+  reserved: 0,
 });
+
+// Same hot-reload hazard as the limiter: a ledger built before `reserved`
+// existed survives the module edit without it, and NaN arithmetic would then
+// disable the cap silently.
+if (typeof ledger.reserved !== "number") ledger.reserved = 0;
 
 /** Bounded so a long-lived dev server can't grow the ledger without limit. */
 const LEDGER_MAX = 5_000;
@@ -514,18 +528,29 @@ function noteSpend(
   });
 }
 
-function guardSpend(estimate: number) {
+function guardSpend(estimate: number): () => void {
   const cap = spendCapUsd();
-  if (cap === null) return;
-  const spent = spentUsd();
-  if (spent + estimate > cap) {
-    throw new VertexError(
-      `Refusing to spend: this call would take the session to about ` +
-        `$${(spent + estimate).toFixed(2)}, past the VERTEX_SPEND_CAP_USD of ` +
-        `$${cap.toFixed(2)}. Raise the cap in .env.local to continue.`,
-      false
-    );
+  if (cap !== null) {
+    const committed = spentUsd() + ledger.reserved;
+    if (committed + estimate > cap) {
+      throw new VertexError(
+        `Refusing to spend: this call would take the session to about ` +
+          `$${(committed + estimate).toFixed(2)}, past the VERTEX_SPEND_CAP_USD ` +
+          `of $${cap.toFixed(2)}. Raise the cap in .env.local to continue.`,
+        false
+      );
+    }
   }
+
+  // Held whether or not a cap is set, so `reserved` always reflects what is in
+  // flight and a cap added later starts from the truth.
+  ledger.reserved += estimate;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    ledger.reserved = Math.max(0, ledger.reserved - estimate);
+  };
 }
 
 export interface VertexImage {
@@ -574,24 +599,30 @@ export async function generateImages(request: ImageRequest): Promise<VertexImage
   // One call per image, deliberately serial: they share the limiter, and on a
   // project this rate-limited a partial result beats a batch that fails whole.
   for (let index = 0; index < wanted; index += 1) {
-    guardSpend(rate.usd);
-
-    const response = await call(
-      account,
-      model,
-      "image",
-      () =>
-        genai(account, location).models.generateContent({
-          model,
-          contents: prompt,
-          config: {
-            responseModalities: ["IMAGE"],
-            ...(Object.keys(imageConfig).length ? { imageConfig } : {}),
-          },
-        }),
-      signal,
-      `${model}`
-    );
+    // The hold is taken before the call and released after it, so a second
+    // concurrent call sees this one's cost even though nothing is recorded yet.
+    const releaseHold = guardSpend(rate.usd);
+    let response;
+    try {
+      response = await call(
+        account,
+        model,
+        "image",
+        () =>
+          genai(account, location).models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              responseModalities: ["IMAGE"],
+              ...(Object.keys(imageConfig).length ? { imageConfig } : {}),
+            },
+          }),
+        signal,
+        `${model}`
+      );
+    } finally {
+      releaseHold();
+    }
 
     const parts = response.candidates?.[0]?.content?.parts ?? [];
     const inline = parts.find((part) => part.inlineData?.data);
@@ -680,67 +711,77 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
   const rate = videoRate(model, generateAudio);
   // Veo bills per second of output, so the whole clip is the unit of spend —
   // this is the call that empties a credit balance, not the stills.
-  guardSpend(rate.usd * seconds);
+  // Held for the whole operation, not just the request: a Veo clip runs for
+  // minutes, and without the hold every other clip started in that window would
+  // check the cap against a total that ignores this one.
+  const releaseHold = guardSpend(rate.usd * seconds);
 
-  const config: Record<string, unknown> = { generateAudio };
-  if (aspectRatio) config.aspectRatio = aspectRatio;
-  if (resolution) config.resolution = resolution;
-  if (durationSeconds) config.durationSeconds = durationSeconds;
-  if (outputGcsUri) config.outputGcsUri = outputGcsUri;
+  let videos;
+  try {
+    const config: Record<string, unknown> = { generateAudio };
+    if (aspectRatio) config.aspectRatio = aspectRatio;
+    if (resolution) config.resolution = resolution;
+    if (durationSeconds) config.durationSeconds = durationSeconds;
+    if (outputGcsUri) config.outputGcsUri = outputGcsUri;
 
-  const location = locationOf(model);
+    const location = locationOf(model);
 
-  let operation = await call(
-    account,
-    model,
-    "video",
-    () =>
-      genai(account, location).models.generateVideos({
-        model,
-        prompt,
-        ...(image ? { image: { imageBytes: image.base64, mimeType: image.mimeType } } : {}),
-        config,
-      }),
-    signal,
-    `Veo (${model})`
-  );
+    let operation = await call(
+      account,
+      model,
+      "video",
+      () =>
+        genai(account, location).models.generateVideos({
+          model,
+          prompt,
+          ...(image ? { image: { imageBytes: image.base64, mimeType: image.mimeType } } : {}),
+          config,
+        }),
+      signal,
+      `Veo (${model})`
+    );
 
-  const deadline = Date.now() + VIDEO_TIMEOUT_MS;
+    const deadline = Date.now() + VIDEO_TIMEOUT_MS;
 
-  while (!operation.done) {
-    if (signal?.aborted) throw new VertexError("Cancelled.", false);
-    if (Date.now() > deadline) {
+    while (!operation.done) {
+      if (signal?.aborted) throw new VertexError("Cancelled.", false);
+      if (Date.now() > deadline) {
+        throw new VertexError(
+          `Veo did not finish within ${Math.round(VIDEO_TIMEOUT_MS / 1000)}s. It may yet ` +
+            `complete and still be billed — check the operation in the Cloud console.`,
+          false
+        );
+      }
+      await sleep(VIDEO_POLL_MS);
+      try {
+        operation = await genai(account, location).operations.getVideosOperation({ operation });
+      } catch (error) {
+        throw classify(error);
+      }
+    }
+
+    if (operation.error) {
       throw new VertexError(
-        `Veo did not finish within ${Math.round(VIDEO_TIMEOUT_MS / 1000)}s. It may yet ` +
-          `complete and still be billed — check the operation in the Cloud console.`,
+        `Veo failed: ${operation.error.message ?? JSON.stringify(operation.error)}`,
         false
       );
     }
-    await sleep(VIDEO_POLL_MS);
-    try {
-      operation = await genai(account, location).operations.getVideosOperation({ operation });
-    } catch (error) {
-      throw classify(error);
+
+    const made = (operation.response?.generatedVideos ?? [])
+      .map((entry) => ({
+        base64: entry.video?.videoBytes,
+        uri: entry.video?.uri,
+        mimeType: entry.video?.mimeType ?? "video/mp4",
+      }))
+      .filter((video) => video.base64 || video.uri);
+
+    if (made.length === 0) {
+      throw new VertexError("Veo finished but returned no video.", false);
     }
-  }
 
-  if (operation.error) {
-    throw new VertexError(
-      `Veo failed: ${operation.error.message ?? JSON.stringify(operation.error)}`,
-      false
-    );
-  }
-
-  const videos = (operation.response?.generatedVideos ?? [])
-    .map((entry) => ({
-      base64: entry.video?.videoBytes,
-      uri: entry.video?.uri,
-      mimeType: entry.video?.mimeType ?? "video/mp4",
-    }))
-    .filter((video) => video.base64 || video.uri);
-
-  if (videos.length === 0) {
-    throw new VertexError("Veo finished but returned no video.", false);
+    videos = made;
+  } finally {
+    releaseHold();
   }
 
   noteSpend(account.id, model, "video", seconds * videos.length, rate);
