@@ -59,6 +59,12 @@ export function isAudioDriven(spec: VideoModelSpec): boolean {
 /** 6–30s at 1s steps, per the Grok schema. */
 const GROK_DURATIONS = Array.from({ length: 25 }, (_, index) => index + 6);
 
+/** 1–15s, per the published Grok Imagine Video 1.5 range. */
+const GROK_15_DURATIONS = Array.from({ length: 15 }, (_, index) => index + 1);
+
+/** 4–12s, per the Seedance 1.5 Pro schema. */
+const SEEDANCE_DURATIONS = Array.from({ length: 9 }, (_, index) => index + 4);
+
 export const VIDEO_MODELS: readonly VideoModelSpec[] = [
   {
     id: "veo3_lite",
@@ -91,6 +97,47 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     aspectRatios: ["16:9", "9:16", "1:1", "3:2", "2:3"],
     defaultAspectRatio: "16:9",
     blurb: "xAI Grok Imagine. Much longer clips (up to 30s), lower resolution ceiling.",
+  },
+  {
+    id: "grok-imagine-video-1-5-preview",
+    label: "Grok Imagine Video 1.5",
+    api: "jobs",
+    provider: "kie",
+    input: "prompt",
+    // Not the `grok-imagine/...` form the older entry uses — this one has no
+    // slash, which was confirmed against kie's API rather than assumed from
+    // the family's naming.
+    requestModel: "grok-imagine-video-1-5-preview",
+    docUrl: "https://kie.ai/grok-imagine-video-1.5",
+    durations: GROK_15_DURATIONS,
+    defaultDuration: 8,
+    resolutions: ["480p", "720p", "1080p"],
+    defaultResolution: "720p",
+    // Taken from the older Grok Imagine entry: kie's docs for this model were
+    // unreachable, and the aspect set is the one part not published elsewhere.
+    aspectRatios: ["16:9", "9:16", "1:1", "3:2", "2:3"],
+    defaultAspectRatio: "16:9",
+    blurb:
+      "xAI Grok Imagine 1.5. 1–15s and up to 1080p — costs scale steeply with " +
+      "resolution (roughly 2.4 / 4.5 / 8 credits per second at 480p / 720p / 1080p).",
+  },
+  {
+    id: "bytedance/seedance-1.5-pro",
+    label: "Seedance 1.5 Pro",
+    api: "jobs",
+    provider: "kie",
+    input: "prompt",
+    requestModel: "bytedance/seedance-1.5-pro",
+    docUrl: "https://docs.kie.ai/market/bytedance/seedance-1-5-pro",
+    durations: SEEDANCE_DURATIONS,
+    defaultDuration: 8,
+    resolutions: ["480p", "720p", "1080p"],
+    defaultResolution: "720p",
+    aspectRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+    defaultAspectRatio: "16:9",
+    blurb:
+      "ByteDance Seedance 1.5 Pro. 4–12s, up to 1080p, and the widest aspect " +
+      "range here including 21:9.",
   },
   {
     // Audio-driven, so every size field below is empty on purpose: the model
