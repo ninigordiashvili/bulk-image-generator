@@ -9,7 +9,8 @@
     "videoRequestsPerMinute": 1,
     "creditUsd": 300,
     "videoConcurrency": 1,
-    "imageConcurrency": 2
+    "imageConcurrency": 2,
+    "spendCapUsd": 10
   },
   {
     "id": "second",
@@ -21,6 +22,7 @@
     "videoRequestsPerMinute": 50,
     "creditUsd": 44,
     "videoConcurrency": 5,
-    "imageConcurrency": 2
+    "imageConcurrency": 2,
+    "spendCapUsd": 10
   }
 ]

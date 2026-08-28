@@ -419,25 +419,25 @@ interface Ledger {
   entries: UsageEntry[];
   since: number;
   /**
-   * Money committed by calls that have started but not yet recorded. Without
-   * this the cap only sees *finished* work, so N concurrent calls each check
-   * against the same total and all pass — the ceiling is then overshot by
-   * roughly one call per lane, which grows with concurrency exactly when the
-   * cap matters most.
+   * Money committed per account by calls that have started but not yet
+   * recorded. Without this the cap only sees *finished* work, so N concurrent
+   * calls each check against the same total and all pass — the ceiling is then
+   * overshot by roughly one call per lane, which grows with concurrency exactly
+   * when the cap matters most.
    */
-  reserved: number;
+  reserved: Map<string, number>;
 }
 
 const ledger: Ledger = ((globalThis as { __vertexLedger?: Ledger }).__vertexLedger ??= {
   entries: [],
   since: Date.now(),
-  reserved: 0,
+  reserved: new Map(),
 });
 
 // Same hot-reload hazard as the limiter: a ledger built before `reserved`
 // existed survives the module edit without it, and NaN arithmetic would then
 // disable the cap silently.
-if (typeof ledger.reserved !== "number") ledger.reserved = 0;
+if (!(ledger.reserved instanceof Map)) ledger.reserved = new Map();
 
 /** Bounded so a long-lived dev server can't grow the ledger without limit. */
 const LEDGER_MAX = 5_000;
@@ -449,8 +449,12 @@ function record(entry: UsageEntry) {
   }
 }
 
-export function spentUsd(): number {
-  return ledger.entries.reduce((total, entry) => total + entry.usd, 0);
+export function spentUsd(accountId?: string): number {
+  return ledger.entries.reduce(
+    (total, entry) =>
+      accountId && entry.accountId !== accountId ? total : total + entry.usd,
+    0
+  );
 }
 
 export function usageSummary() {
@@ -534,15 +538,19 @@ function noteSpend(
   });
 }
 
-function guardSpend(estimate: number): () => void {
-  const cap = spendCapUsd();
+function guardSpend(account: VertexAccount, estimate: number): () => void {
+  // The account's own ceiling wins; the env value is the fallback for an
+  // account that sets none.
+  const cap = account.spendCapUsd ?? spendCapUsd();
+  const held = ledger.reserved.get(account.id) ?? 0;
+
   if (cap !== null) {
-    const committed = spentUsd() + ledger.reserved;
+    const committed = spentUsd(account.id) + held;
     if (committed + estimate > cap) {
       throw new VertexError(
-        `Refusing to spend: this call would take the session to about ` +
-          `$${(committed + estimate).toFixed(2)}, past the VERTEX_SPEND_CAP_USD ` +
-          `of $${cap.toFixed(2)}. Raise the cap in .env.local to continue.`,
+        `Refusing to spend: this call would take account "${account.id}" to about ` +
+          `$${(committed + estimate).toFixed(2)}, past its cap of $${cap.toFixed(2)}. ` +
+          `Raise spendCapUsd in vertex-accounts.json to continue.`,
         false
       );
     }
@@ -550,12 +558,13 @@ function guardSpend(estimate: number): () => void {
 
   // Held whether or not a cap is set, so `reserved` always reflects what is in
   // flight and a cap added later starts from the truth.
-  ledger.reserved += estimate;
+  ledger.reserved.set(account.id, held + estimate);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    ledger.reserved = Math.max(0, ledger.reserved - estimate);
+    const now = ledger.reserved.get(account.id) ?? 0;
+    ledger.reserved.set(account.id, Math.max(0, now - estimate));
   };
 }
 
@@ -607,7 +616,7 @@ export async function generateImages(request: ImageRequest): Promise<VertexImage
   for (let index = 0; index < wanted; index += 1) {
     // The hold is taken before the call and released after it, so a second
     // concurrent call sees this one's cost even though nothing is recorded yet.
-    const releaseHold = guardSpend(rate.usd);
+    const releaseHold = guardSpend(account, rate.usd);
     let response;
     try {
       response = await call(
@@ -720,7 +729,7 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
   // Held for the whole operation, not just the request: a Veo clip runs for
   // minutes, and without the hold every other clip started in that window would
   // check the cap against a total that ignores this one.
-  const releaseHold = guardSpend(rate.usd * seconds);
+  const releaseHold = guardSpend(account, rate.usd * seconds);
 
   let videos;
   try {

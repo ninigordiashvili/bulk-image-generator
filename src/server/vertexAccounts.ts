@@ -48,6 +48,14 @@ export interface VertexAccount {
    */
   imageConcurrency?: number;
   videoConcurrency?: number;
+  /**
+   * Hard ceiling on what this account may spend, checked before every call.
+   * Per account rather than per session because the credit is per account —
+   * a shared figure would let a cheap image run exhaust the budget meant for
+   * the expensive video one. Lives here, not in `.env.local`, so it can be
+   * raised mid-batch without a restart.
+   */
+  spendCapUsd?: number;
   /** Credit remaining, for display only — Google exposes no API for it. */
   creditUsd?: number;
 }
@@ -148,6 +156,7 @@ export async function loadVertexAccounts(): Promise<LoadedVertexAccounts> {
       videoRequestsPerMinute: positive(row.videoRequestsPerMinute),
       imageConcurrency: positive(row.imageConcurrency),
       videoConcurrency: positive(row.videoConcurrency),
+      spendCapUsd: positive(row.spendCapUsd),
       creditUsd: positive(row.creditUsd),
     });
   });
