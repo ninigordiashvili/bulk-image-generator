@@ -37,6 +37,17 @@ export interface VertexAccount {
   /** Per-account quota, since it is granted per project and differs per account. */
   imageRequestsPerMinute?: number;
   videoRequestsPerMinute?: number;
+  /**
+   * How many calls of each kind may run at once for this account.
+   *
+   * Deliberately here rather than in `.env.local`: this file is re-read on every
+   * request, so it can be changed while a batch is queued and takes effect on
+   * the next call. Editing an env var restarts the dev server instead, and the
+   * storyboard does not survive a page reload — the shots hold megabytes of
+   * base64 each and are never persisted, so a restart costs whatever was typed.
+   */
+  imageConcurrency?: number;
+  videoConcurrency?: number;
   /** Credit remaining, for display only — Google exposes no API for it. */
   creditUsd?: number;
 }
@@ -135,6 +146,8 @@ export async function loadVertexAccounts(): Promise<LoadedVertexAccounts> {
       credentials,
       imageRequestsPerMinute: positive(row.imageRequestsPerMinute),
       videoRequestsPerMinute: positive(row.videoRequestsPerMinute),
+      imageConcurrency: positive(row.imageConcurrency),
+      videoConcurrency: positive(row.videoConcurrency),
       creditUsd: positive(row.creditUsd),
     });
   });

@@ -1,22 +1,26 @@
 [
   {
     "id": "main",
-    "label": "Vertex — main ($300 credits)",
+    "label": "Vertex \u2014 main ($300 credits)",
     "projectId": "project-3e42ee91-0ff1-4032-a24",
     "location": "us-central1",
     "credentials": "adc",
     "imageRequestsPerMinute": 2,
     "videoRequestsPerMinute": 1,
-    "creditUsd": 300
+    "creditUsd": 300,
+    "videoConcurrency": 1,
+    "imageConcurrency": 2
   },
   {
     "id": "second",
-    "label": "Vertex — second account",
+    "label": "Vertex \u2014 second account",
     "projectId": "PASTE_SECOND_PROJECT_ID_HERE",
     "location": "us-central1",
     "credentials": "./vertex-second-key.json",
     "imageRequestsPerMinute": 2,
     "videoRequestsPerMinute": 50,
-    "creditUsd": 44
+    "creditUsd": 44,
+    "videoConcurrency": 5,
+    "imageConcurrency": 2
   }
 ]

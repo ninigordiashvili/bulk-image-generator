@@ -150,7 +150,13 @@ async function acquire(
   if (signal?.aborted) throw new VertexError("Cancelled.", false);
 
   const lane = limiter.lanes[kind];
-  const ceiling = kind === "video" ? CONCURRENCY_VIDEO : CONCURRENCY_IMAGE;
+  // The account's own figure wins, and it is re-read from disk on every request,
+  // so widening a lane mid-batch needs no restart — which matters because a
+  // restart reloads the page and the storyboard is not persisted.
+  const ceiling =
+    kind === "video"
+      ? (account.videoConcurrency ?? CONCURRENCY_VIDEO)
+      : (account.imageConcurrency ?? CONCURRENCY_IMAGE);
 
   while (lane.active >= ceiling) {
     await new Promise<void>((resume) => lane.waiting.push(resume));
