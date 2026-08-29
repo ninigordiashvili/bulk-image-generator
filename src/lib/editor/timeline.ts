@@ -119,6 +119,22 @@ export function buildTimeline({
       previous.fixedLength === undefined &&
       item.fixedLength === undefined
     ) {
+      // Which one survives is decided by kind, not by the filename. Sorting
+      // breaks ties alphabetically on the full name, so the extension used to
+      // decide it: `.mp4` beat `.png`, but `.jpg` beat `.mp4` — the same pair
+      // of files resolving opposite ways depending on the image format, which
+      // is not something anyone could predict from the outside. Footage always
+      // wins now: a still and a clip at one cue means the clip was made *from*
+      // that still, so the still is the leftover.
+      const previousIsStill = previous.kind === "still";
+      const itemIsStill = item.kind === "still";
+
+      if (previousIsStill && !itemIsStill) {
+        warnings.push(`${previous.label} — same timestamp as ${item.label}, skipped.`);
+        deduped[deduped.length - 1] = item;
+        continue;
+      }
+
       warnings.push(`${item.label} — same timestamp as ${previous.label}, skipped.`);
       continue;
     }
