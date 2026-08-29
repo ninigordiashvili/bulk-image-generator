@@ -185,7 +185,11 @@ export const VIDEO_MODELS: readonly VideoModelSpec[] = [
     docUrl: "https://cloud.google.com/vertex-ai/generative-ai/pricing",
     // Veo named these itself when it rejected an out-of-range request.
     durations: [4, 6, 8],
-    defaultDuration: 8,
+    // 4s, not the 8s the kie Veo entry defaults to: it is what actually gets
+    // picked here, and Veo bills per second of output, so the longer default
+    // silently costs double. A default that spends twice what was wanted is
+    // not a neutral choice.
+    defaultDuration: 4,
     // kie's Veo offers 4k; Vertex did not accept it here, so it is left out
     // rather than shown and then rejected after a minute of waiting.
     resolutions: ["720p", "1080p"],

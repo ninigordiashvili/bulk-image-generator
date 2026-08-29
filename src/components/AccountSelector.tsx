@@ -58,14 +58,31 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
         )
       : null;
 
-  const videoSpec = shots.length ? videoModel(shots[0].model) : null;
+  // Before any shots exist the batch defaults are the only statement of intent
+  // there is, so they stand in for it — a per-clip figure at the length
+  // currently selected, which is what makes the duration pills show their price
+  // before anything has been loaded.
+  const videoDefaults = useVideoStore((state) => state.defaults);
+  const videoSpec = videoModel(shots.length ? shots[0].model : videoDefaults.model);
+  const isVertexVideo = isVertex && !!limits && videoSpec.provider === "vertex";
+
   const videoPlan =
-    isVertex && limits && shots.length > 0 && videoSpec?.provider === "vertex"
+    isVertexVideo && shots.length > 0
       ? estimateVideos(
           shots.map((shot) => shot.duration),
           videoSpec.requestModel,
-          limits.videoPerMinute,
-          limits.videoConcurrency
+          limits!.videoPerMinute,
+          limits!.videoConcurrency
+        )
+      : null;
+
+  const perClipPlan =
+    isVertexVideo && shots.length === 0
+      ? estimateVideos(
+          [videoDefaults.duration],
+          videoSpec.requestModel,
+          limits!.videoPerMinute,
+          limits!.videoConcurrency
         )
       : null;
 
@@ -154,7 +171,16 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
               <span className="opacity-70">({videoPlan.boundBy}-bound)</span>
             </p>
           )}
-          {!imagePlan && !videoPlan && (
+          {perClipPlan && (
+            <p>
+              {videoDefaults.duration}s clip ={" "}
+              <span className="font-semibold text-foreground">
+                {formatUsd(perClipPlan.usd)}
+              </span>{" "}
+              each · about {perClipPlan.perMinute.toFixed(1)}/min
+            </p>
+          )}
+          {!imagePlan && !videoPlan && !perClipPlan && (
             <p className="opacity-70">
               Add prompts or shots to see an estimated time and cost.
             </p>
