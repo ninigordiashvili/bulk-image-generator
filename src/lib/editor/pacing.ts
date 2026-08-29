@@ -14,12 +14,28 @@
  * The frame levels the cutter works from are 20ms averages, so a pause boundary
  * is already ±20ms uncertain, and the level crosses the line some way into the
  * word at either end — later still on a consonant, which is where the audible
- * damage shows. A quarter of a second is far more than any of that needs and
- * costs only a slightly longer pause. It applies at both ends of every hole and
- * around anything a hole has to step over, and no setting can shrink it: see
- * `excessOf` and `keepIslands` in `server/editor/voiceover.ts`.
+ * damage shows. That is about 42ms of real uncertainty; this is 3.6x it. It
+ * applies at both ends of every hole and around anything a hole has to step
+ * over, and no setting can shrink it: see `excessOf` and `keepIslands` in
+ * `server/editor/voiceover.ts`.
+ *
+ * This is the *second* line of defence, not the first. `toRoom` locates the
+ * true end of a word by walking each pause end inward until 60ms of frames sit
+ * within 3dB of the noise floor, and it does that regardless of this value —
+ * so the guard is margin on top of an already conservative boundary. That is
+ * what makes 0.15 safe where a naive 0.15 would not be.
+ *
+ * Measured on the real detector's output for a 2.26s gap: the cut lands 0.11s
+ * clear of the previous word's audio and 0.15s clear of the next word's run-up.
+ * It was 0.25 until 2026-08-29; the extra 0.10 bought nothing but a longer
+ * pause, and left every gap at 1.22s when 1.02s was reachable.
+ *
+ * Where the remaining risk lives: not ordinary speech, but a take whose noise
+ * floor is mis-estimated, which is what leaves `toRoom` in the wrong place. A
+ * bigger guard buys forgiveness there — so if `PaceReport.uncertain` is set,
+ * listen to the word ends before trusting the output.
  */
-export const SPEECH_GUARD = 0.25;
+export const SPEECH_GUARD = 0.15;
 
 /** A pause is only ever shortened to the two guards or longer. */
 export const MIN_KEEP_GAP = SPEECH_GUARD * 2;
