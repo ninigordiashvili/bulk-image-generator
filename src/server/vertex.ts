@@ -503,11 +503,16 @@ export function usageSummary() {
     })),
     recent: ledger.entries.slice(-20),
     /**
-     * Set whenever any rate came from the placeholder table rather than from an
-     * env override, so the UI can label the figure instead of implying it is a
-     * bill.
+     * Whether any model *currently* in the ledger is still priced from an
+     * unconfirmed rate. Read from today's table rather than from the flag each
+     * entry was stamped with: confirming a rate should clear the warning, and
+     * stamping is historical — an entry recorded before a rate was checked
+     * would otherwise keep the ledger looking unverified for the life of the
+     * process even though nothing about the number is in doubt any more.
      */
-    ratesUnverified: ledger.entries.some((entry) => entry.estimated),
+    ratesUnverified: [...byModel.entries()].some(([model, row]) =>
+      row.kind === "video" ? !videoRate(model).verified : !imageRate(model).verified
+    ),
     note:
       "Spend is estimated locally: Google publishes no API for remaining credit " +
       "on a billing account. Counts are exact; dollars depend on the rate table.",

@@ -1,12 +1,13 @@
 /**
  * What a generation costs, so the app can show spend against the $300 credit.
  *
- * **These rates are not authoritative and the app says so wherever it shows a
- * number.** Google publishes them at https://cloud.google.com/vertex-ai/pricing
- * and changes them; nothing in this repo can read them back, and the Cloud
- * Billing API exposes no "credit remaining" figure either — a budget can be
- * queried, a balance cannot. So the honest design is: count exactly, price
- * approximately, and never present the result as a bill.
+ * Each rate is either **confirmed** — read off Google's pricing by a person and
+ * listed in `CONFIRMED` below — or a placeholder, and every figure the app
+ * shows says which it is. Nothing here can check itself: Google publishes the
+ * prices at https://cloud.google.com/vertex-ai/pricing and changes them, and
+ * the Cloud Billing API exposes no "credit remaining" figure either — a budget
+ * can be queried, a balance cannot. So the design is: count exactly, price from
+ * a table someone vouched for, and never present the result as a bill.
  *
  * Override any rate from `.env.local` without touching this file:
  *
@@ -27,9 +28,10 @@ export interface Rate {
 }
 
 /**
- * Placeholders, deliberately round. They exist so the counter has something to
- * multiply on day one, not because they are right. Replace them from the
- * pricing page — or via env — before trusting any total.
+ * Per image. Only `gemini-3.1-flash-lite-image` is confirmed; the rest are
+ * round placeholders that exist so the counter has something to multiply, not
+ * because anyone checked them. Replace from the pricing page — or via env —
+ * before trusting a total that involves them.
  */
 const IMAGE_RATES: Record<string, number> = {
   "gemini-2.5-flash-image": 0.04,
@@ -57,8 +59,21 @@ const VIDEO_RATES_AUDIO: Record<string, number> = {
   "veo-3.1-lite-generate-001": 0.15,
 };
 
-/** Rates a human has confirmed, so the UI stops labelling them as estimates. */
-const CONFIRMED = new Set(["video:silent:veo-3.1-lite-generate-001"]);
+/**
+ * Rates a human has read off Google's own pricing and confirmed, so the UI
+ * stops labelling them as estimates. Everything not in here is a placeholder,
+ * however plausible it looks — the point of the flag is that a number nobody
+ * checked never gets presented as a bill.
+ *
+ * Confirmed by the user on 2026-08-29: $0.02 per image for
+ * gemini-3.1-flash-lite-image, and $0.03 per second of silent video for
+ * veo-3.1-lite-generate-001. Both already matched the placeholder, so no total
+ * changes — only how much they can be trusted.
+ */
+const CONFIRMED = new Set([
+  "image:gemini-3.1-flash-lite-image",
+  "video:silent:veo-3.1-lite-generate-001",
+]);
 
 const DEFAULT_IMAGE_USD = 0.04;
 const DEFAULT_VIDEO_USD = 0.4;
@@ -77,7 +92,7 @@ export function imageRate(model: string): Rate {
   return {
     usd: known ?? DEFAULT_IMAGE_USD,
     unit: "image",
-    verified: false,
+    verified: CONFIRMED.has(`image:${model}`),
   };
 }
 
