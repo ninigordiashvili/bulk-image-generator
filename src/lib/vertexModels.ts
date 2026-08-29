@@ -37,6 +37,13 @@ export interface VertexImageModel {
   maxImages: number;
   /** The project's measured per-minute quota for this model. */
   requestsPerMinute: number;
+  /**
+   * Roughly how long one call takes, measured. Needed because quota is not
+   * always the binding constraint: at 2/min an image waits on quota, but a Veo
+   * clip on the 50/min account waits on the model, and an estimate built from
+   * quota alone would promise 50 clips a minute when five is the truth.
+   */
+  typicalCallSeconds: number;
 }
 
 export interface VertexVideoModel {
@@ -51,6 +58,10 @@ export interface VertexVideoModel {
   durations: readonly number[];
   imageToVideo: boolean;
   requestsPerMinute: number;
+  /** Fixed cost of a call, before the per-second-of-output part. */
+  typicalCallSeconds: number;
+  /** Added per second of requested clip length. */
+  secondsPerOutputSecond: number;
 }
 
 export const VERTEX_IMAGE_MODELS: readonly VertexImageModel[] = [
@@ -66,6 +77,8 @@ export const VERTEX_IMAGE_MODELS: readonly VertexImageModel[] = [
     maxImages: 1,
     // GenContentImageGenRequestsPerMinutePerProjectPerBaseModelGlobal = 2
     requestsPerMinute: 2,
+    // Measured: 5-13s per image when not waiting on quota.
+    typicalCallSeconds: 10,
   },
   {
     id: "gemini-2.5-flash-image",
@@ -78,6 +91,7 @@ export const VERTEX_IMAGE_MODELS: readonly VertexImageModel[] = [
     verifiedImageSizes: ["1K"],
     maxImages: 1,
     requestsPerMinute: 2,
+    typicalCallSeconds: 10,
   },
 ];
 
@@ -94,8 +108,13 @@ export const VERTEX_VIDEO_MODELS: readonly VertexVideoModel[] = [
     // Veo itself listed these when it rejected an out-of-range ask.
     durations: [4, 6, 8],
     imageToVideo: true,
-    // LongRunningPredictRequestsPerMinutePerProjectPerBaseModel = 1
+    // LongRunningPredictRequestsPerMinutePerProjectPerBaseModel = 1 on the main
+    // account and 50 on the second; the account's own figure overrides this.
     requestsPerMinute: 1,
+    // Measured: a 4s 720p clip took 37s end to end, so about 29s of fixed cost
+    // plus roughly two seconds of work per second of output.
+    typicalCallSeconds: 29,
+    secondsPerOutputSecond: 2,
   },
 ];
 

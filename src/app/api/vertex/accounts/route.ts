@@ -41,6 +41,12 @@ export async function GET() {
         // Vertex never reads a key from the environment the way kie can, but the
         // picker keys off this field, so an env-derived fallback says so.
         source: account.credentials === "adc" ? "env" : "file",
+        limits: {
+          imagePerMinute: account.imageRequestsPerMinute ?? 2,
+          videoPerMinute: account.videoRequestsPerMinute ?? 1,
+          imageConcurrency: account.imageConcurrency ?? 2,
+          videoConcurrency: account.videoConcurrency ?? 1,
+        },
       })),
       problems: problems.map(({ id, problem }) => ({
         id,

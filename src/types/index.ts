@@ -25,6 +25,17 @@ export interface KieAccount {
   keyHint: string;
   /** Set when the account list is merged in the store; absent from the wire. */
   provider?: Provider;
+  /**
+   * Vertex only. The account's quota and lane width, so the UI can estimate how
+   * long a batch will take rather than only what it will cost. Absent for
+   * kie.ai, which meters by credit rather than by rate.
+   */
+  limits?: {
+    imagePerMinute: number;
+    videoPerMinute: number;
+    imageConcurrency: number;
+    videoConcurrency: number;
+  };
   /** Where the key came from — `env` accounts aren't in the JSON file. */
   source: "file" | "env";
 }

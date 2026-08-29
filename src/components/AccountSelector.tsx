@@ -2,7 +2,16 @@
 
 import { useEffect } from "react";
 import { creditsToUsd, formatCredits, formatUsd } from "@/lib/pricing";
-import { useGenerationStore } from "@/store/generationStore";
+import { parsePrompts } from "@/lib/prompts";
+import { activeModelId, useGenerationStore } from "@/store/generationStore";
+import { useVideoStore } from "@/store/videoStore";
+import { videoModel } from "@/lib/videoModels";
+import {
+  estimateImages,
+  estimateVideos,
+  formatDuration,
+} from "@/lib/vertexEstimate";
+import { MAX_PROMPTS } from "@/types";
 
 export function AccountSelector({ disabled }: { disabled: boolean }) {
   const accounts = useGenerationStore((state) => state.accounts);
@@ -28,6 +37,37 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
   const kieAccounts = accounts.filter((account) => account.provider !== "vertex");
   const vertexAccounts = accounts.filter((account) => account.provider === "vertex");
   const isVertex = provider === "vertex";
+
+  // The two pending batches, read straight from the stores that own them, so
+  // the estimate follows what is actually queued rather than a typed-in number.
+  const settings = useGenerationStore((state) => state.settings);
+  const promptText = useGenerationStore((state) => state.promptText);
+  const shots = useVideoStore((state) => state.shots);
+
+  const limits = selected?.limits;
+  const imageCount = isVertex
+    ? Math.min(parsePrompts(promptText).length, MAX_PROMPTS) * settings.imagesPerPrompt
+    : 0;
+  const imagePlan =
+    isVertex && limits && imageCount > 0
+      ? estimateImages(
+          imageCount,
+          activeModelId(settings),
+          limits.imagePerMinute,
+          limits.imageConcurrency
+        )
+      : null;
+
+  const videoSpec = shots.length ? videoModel(shots[0].model) : null;
+  const videoPlan =
+    isVertex && limits && shots.length > 0 && videoSpec?.provider === "vertex"
+      ? estimateVideos(
+          shots.map((shot) => shot.duration),
+          videoSpec.requestModel,
+          limits.videoPerMinute,
+          limits.videoConcurrency
+        )
+      : null;
 
   return (
     <section className="panel">
@@ -82,10 +122,44 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
           bills the cloud account directly and publishes no balance API, so the
           quota — the thing that actually paces a Vertex run — is shown instead. */}
       {selected && isVertex && (
-        <p className="mt-2 text-xs text-muted">
-          Rate limits{" "}
-          <span className="font-semibold text-foreground">{selected.keyHint}</span>
-        </p>
+        <div className="mt-2 space-y-1 text-xs text-muted">
+          <p>
+            Rate limits{" "}
+            <span className="font-semibold text-foreground">{selected.keyHint}</span>
+          </p>
+
+          {/* Time and money for what is actually queued. Both are estimates:
+              the rate is real but a 429 or a slow model day moves it. */}
+          {imagePlan && (
+            <p>
+              {imageCount} image{imageCount === 1 ? "" : "s"} ≈{" "}
+              <span className="font-semibold text-foreground">
+                {formatDuration(imagePlan.minutes)}
+              </span>{" "}
+              · <span className="font-semibold text-foreground">
+                {formatUsd(imagePlan.usd)}
+              </span>{" "}
+              <span className="opacity-70">({imagePlan.boundBy}-bound)</span>
+            </p>
+          )}
+          {videoPlan && (
+            <p>
+              {shots.length} clip{shots.length === 1 ? "" : "s"} ≈{" "}
+              <span className="font-semibold text-foreground">
+                {formatDuration(videoPlan.minutes)}
+              </span>{" "}
+              · <span className="font-semibold text-foreground">
+                {formatUsd(videoPlan.usd)}
+              </span>{" "}
+              <span className="opacity-70">({videoPlan.boundBy}-bound)</span>
+            </p>
+          )}
+          {!imagePlan && !videoPlan && (
+            <p className="opacity-70">
+              Add prompts or shots to see an estimated time and cost.
+            </p>
+          )}
+        </div>
       )}
       {selected && !isVertex && (
         <p className="mt-2 text-xs">
