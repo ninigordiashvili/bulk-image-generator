@@ -23,11 +23,25 @@ function fadesOf(moment: TextMoment): { in: number; out: number } {
 const smoothstep = (p: number) => p * p * (3 - 2 * p);
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 
-/** Where the text starts from, as a fraction of height, or null for "in place". */
-function travelFrom(animation: TextMoment["animation"]): number | null {
-  if (animation === "rise") return 0.7;
-  if (animation === "drop") return 0.3;
+/**
+ * How far the text travels before settling, as a fraction of height, signed:
+ * positive starts below the rest position and moves up. Null is "in place".
+ *
+ * Relative to where the text rests rather than absolute, which matters now that
+ * it can rest anywhere. Rising used to mean "start at 0.7 and stop at 0.5"; if
+ * the text is dragged to 0.85 that would have it starting *above* its rest and
+ * travelling down, which is not a rise. The old numbers are this offset applied
+ * at the centre, so nothing moves for a moment that was never dragged.
+ */
+function travelOffset(animation: TextMoment["animation"]): number | null {
+  if (animation === "rise") return 0.2;
+  if (animation === "drop") return -0.2;
   return null;
+}
+
+/** Where a moment rests, defaulting to the centre for anything never dragged. */
+export function restOf(moment: TextMoment): { x: number; y: number } {
+  return { x: moment.x ?? 0.5, y: moment.y ?? 0.5 };
 }
 
 /** The moments showing at `time`, in the order they were added. */
@@ -77,12 +91,15 @@ export function drawMoments(
     context.textAlign = "center";
     context.textBaseline = "middle";
 
-    const from = travelFrom(moment.animation);
-    const centre = height / 2;
+    const rest = restOf(moment);
+    const restX = width * rest.x;
+    const restY = height * rest.y;
+    const offset = travelOffset(moment.animation);
     const y =
-      from === null
-        ? centre
-        : height * from + (centre - height * from) * smoothstep(clamp01((time - moment.start) / TRAVEL));
+      offset === null
+        ? restY
+        : restY +
+          height * offset * (1 - smoothstep(clamp01((time - moment.start) / TRAVEL)));
 
     // The bar first, sized to the words, so the rest lands on top of it.
     if (look.box) {
@@ -90,7 +107,7 @@ export function drawMoments(
       const measured = context.measureText(words).width;
       context.fillStyle = `rgba(0,0,0,${look.boxAlpha})`;
       context.fillRect(
-        width / 2 - measured / 2 - pad,
+        restX - measured / 2 - pad,
         y - size / 2 - pad,
         measured + pad * 2,
         size + pad * 2
@@ -109,13 +126,13 @@ export function drawMoments(
       context.lineWidth = Math.max(1, height * look.rim) * 2;
       context.strokeStyle = `rgba(0,0,0,${look.rimAlpha})`;
       context.lineJoin = "round";
-      context.strokeText(words, width / 2, y);
+      context.strokeText(words, restX, y);
     }
     context.shadowColor = "transparent";
     context.shadowOffsetY = 0;
     context.shadowBlur = 0;
     context.fillStyle = `#${look.colour}`;
-    context.fillText(words, width / 2, y);
+    context.fillText(words, restX, y);
 
     context.restore();
   }

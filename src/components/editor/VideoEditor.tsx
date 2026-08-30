@@ -22,6 +22,7 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
   const tailSeconds = useEditorStore((state) => state.tailSeconds);
   const fileName = useEditorStore((state) => state.fileName);
   const exportState = useEditorStore((state) => state.export);
+  const updateMoment = useEditorStore((state) => state.updateMoment);
 
   const addImages = useEditorStore((state) => state.addImages);
   const removeImage = useEditorStore((state) => state.removeImage);
@@ -113,6 +114,7 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
             maxStretch={settings.maxStretch}
             thumbnails={thumbnails}
             onToggleImage={toggleImage}
+            onMoveMoment={(id, x, y) => updateMoment(id, { x, y })}
           />
 
           <CueList

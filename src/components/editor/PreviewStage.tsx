@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatTime } from "@/lib/editor/format";
 import { applyLook } from "@/lib/editor/filmPreview";
 import { BitmapCache } from "@/lib/editor/media";
-import { drawMoments } from "@/lib/editor/momentPreview";
+import { drawMoments, momentsAt, restOf } from "@/lib/editor/momentPreview";
 import { clipAt, clipZoom, type Timeline } from "@/lib/editor/timeline";
 import type { AudioTrack, EditorImage } from "@/store/editorStore";
 import type { FilmLook, TextMoment, ZoomDirection } from "@/types/editor";
@@ -30,6 +30,8 @@ interface Props {
   maxStretch: number;
   thumbnails: Map<string, string>;
   onToggleImage: (id: string) => void;
+  /** Drag-to-position. Fractions of the frame, addressing the text's centre. */
+  onMoveMoment: (id: string, x: number, y: number) => void;
 }
 
 export function PreviewStage({
@@ -44,6 +46,7 @@ export function PreviewStage({
   maxStretch,
   thumbnails,
   onToggleImage,
+  onMoveMoment,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -133,6 +136,15 @@ export function PreviewStage({
     };
   }, []);
 
+  /**
+   * Which moment the pointer grabbed, and how far from its centre — without the
+   * offset the text jumps so its middle lands under the cursor on mousedown,
+   * which reads as the drag having already moved it.
+   */
+  const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
+  /** Set once the pointer actually moves, so a plain click still toggles play. */
+  const draggedRef = useRef(false);
+
   const cacheRef = useRef<BitmapCache | null>(null);
   useEffect(() => {
     if (cacheRef.current == null) cacheRef.current = new BitmapCache(PREVIEW_WIDTH);
@@ -160,6 +172,58 @@ export function PreviewStage({
     },
     [total]
   );
+
+  /** Canvas coordinates from a pointer event, as fractions of the frame. */
+  const pointFrom = useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    // `object-contain` letterboxes, so the drawn picture is not the element:
+    // reading fractions off the element would put the text somewhere else.
+    const scale = Math.min(rect.width / PREVIEW_WIDTH, rect.height / PREVIEW_HEIGHT);
+    const drawnW = PREVIEW_WIDTH * scale;
+    const drawnH = PREVIEW_HEIGHT * scale;
+    const left = rect.left + (rect.width - drawnW) / 2;
+    const top = rect.top + (rect.height - drawnH) / 2;
+    return {
+      x: (event.clientX - left) / drawnW,
+      y: (event.clientY - top) / drawnH,
+    };
+  }, []);
+
+  const onPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const showing = momentsAt(momentsRef.current, currentTime()).filter((moment) =>
+        moment.text.trim()
+      );
+      if (showing.length === 0) return;
+
+      // Last wins: it is the one drawn on top, so it is the one being pointed at.
+      const moment = showing[showing.length - 1];
+      const point = pointFrom(event);
+      const rest = restOf(moment);
+      dragRef.current = { id: moment.id, dx: rest.x - point.x, dy: rest.y - point.y };
+      draggedRef.current = false;
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [currentTime, pointFrom]
+  );
+
+  const onPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      draggedRef.current = true;
+      const point = pointFrom(event);
+      // Clamped so text cannot be parked outside the frame and lost.
+      const clamp = (value: number) => Math.max(0, Math.min(1, value));
+      onMoveMoment(drag.id, clamp(point.x + drag.dx), clamp(point.y + drag.dy));
+    },
+    [onMoveMoment, pointFrom]
+  );
+
+  const onPointerUp = useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (dragRef.current) event.currentTarget.releasePointerCapture(event.pointerId);
+    dragRef.current = null;
+  }, []);
 
   const pause = useCallback(() => {
     playingRef.current = false;
@@ -409,8 +473,20 @@ export function PreviewStage({
           ref={canvasRef}
           width={PREVIEW_WIDTH}
           height={PREVIEW_HEIGHT}
-          onClick={toggle}
-          className="block aspect-video max-h-[58vh] w-full cursor-pointer object-contain"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          onClick={() => {
+            // A drag ends with a click; without this every reposition would
+            // also start or stop playback.
+            if (draggedRef.current) {
+              draggedRef.current = false;
+              return;
+            }
+            toggle();
+          }}
+          className="block aspect-video max-h-[58vh] w-full cursor-pointer object-contain touch-none"
         />
         {empty && (
           <div className="absolute inset-0 grid place-items-center px-6 text-center">

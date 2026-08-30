@@ -218,6 +218,17 @@ export interface TextMoment {
   darken: number;
   /** Text height as a fraction of frame height, so it scales with the export. */
   size: number;
+  /**
+   * Where the text sits, as a fraction of the frame — 0.5/0.5 is the centre,
+   * which is where everything sat before this existed. Stored as fractions
+   * rather than pixels so a moment placed against the 960-wide preview lands in
+   * the same place in a 1920 or 3840 export.
+   *
+   * Optional because moments saved before dragging existed have neither, and
+   * they must keep centring rather than collapsing into the corner.
+   */
+  x?: number;
+  y?: number;
   /** Seconds to fade up on arrival. 0 snaps on. */
   fadeIn: number;
   /** And to fade away at the end. Counted inside `duration`, not added to it. */
@@ -232,6 +243,8 @@ export const MOMENT_DEFAULTS = {
   fadeOut: 0.45,
   darken: 0.35,
   size: 0.12,
+  x: 0.5,
+  y: 0.5,
 };
 
 export const MAX_MOMENTS = 60;

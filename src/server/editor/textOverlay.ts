@@ -74,11 +74,23 @@ export function escapeDrawText(text: string): string {
 
 const fixed = (value: number) => value.toFixed(3);
 
-/** Where the text sits before it has finished arriving, as a fraction of height. */
-function travelFrom(animation: TextMoment["animation"]): number | null {
-  if (animation === "rise") return 0.7;
-  if (animation === "drop") return 0.3;
-  return null; // "fade" arrives in place
+/**
+ * How far the text travels before settling, as a fraction of height, signed:
+ * positive starts below the rest position and moves up. Null arrives in place.
+ *
+ * An offset rather than an absolute point, because the text can now rest
+ * anywhere. "Rise" used to mean start at 0.7 and stop at 0.5; text dragged to
+ * 0.85 would then have started *above* its rest and moved down, which is not a
+ * rise. These are the old numbers expressed as the distance they covered, so a
+ * moment that was never dragged behaves exactly as before.
+ *
+ * Mirrors `travelOffset` in lib/editor/momentPreview.ts — the two must agree or
+ * the preview shows the text somewhere the export will not put it.
+ */
+function travelOffset(animation: TextMoment["animation"]): number | null {
+  if (animation === "rise") return 0.2;
+  if (animation === "drop") return -0.2;
+  return null;
 }
 
 /**
@@ -126,15 +138,25 @@ export function momentChain(
   }
 
   // --- the text itself ---------------------------------------------------
-  const from = travelFrom(moment.animation);
-  const centre = "((h-text_h)/2)";
+  // Fractions of the frame, so a position set against the preview lands in the
+  // same place whatever the export size. Absent means centred, which is where
+  // every moment sat before this was draggable.
+  const restX = moment.x ?? 0.5;
+  const restY = moment.y ?? 0.5;
+  // `text_h` is only known inside drawtext, so the anchor is written as an
+  // expression rather than a number: the fraction addresses the centre of the
+  // text, and half its height comes back off here.
+  const rest = `(h*${restY.toFixed(4)}-text_h/2)`;
+  const offset = travelOffset(moment.animation);
   const y =
-    from === null
-      ? centre
+    offset === null
+      ? rest
       : `st(0,min(1,max(0,(t-${fixed(start)})/${TRAVEL})));` +
         `st(1,ld(0)*ld(0)*(3-2*ld(0)));` +
-        // Smoothstep, so it settles rather than stopping dead.
-        `(h*${from})+(${centre}-(h*${from}))*ld(1)`;
+        // Smoothstep, so it settles rather than stopping dead. The travel is an
+        // offset from the rest position, not a fixed point, so it reads as a
+        // rise wherever the text has been dragged to.
+        `${rest}+(h*${offset.toFixed(4)})*(1-ld(1))`;
 
   // A zero fade would divide by zero; it becomes a single frame instead, which
   // is a snap to anyone watching.
@@ -165,7 +187,7 @@ export function momentChain(
       look.box
         ? `:box=1:boxcolor=black@${look.boxAlpha}:boxborderw=${Math.round(fontSize * 0.35)}`
         : "",
-      ":x=(w-text_w)/2",
+      `:x=(w*${restX.toFixed(4)}-text_w/2)`,
       `:y='${y}'`,
       `:alpha='${alpha}'`,
       `:enable='between(t,${fixed(start)},${fixed(end)})'`,
