@@ -34,6 +34,19 @@ import {
  * talking-avatar clip. They share a timeline and differ in what the renderer
  * does with them.
  */
+/**
+ * A plate attached to a text moment — the gradient or bar that stands behind
+ * it. Held apart from `images` on purpose: those are timeline clips placed by
+ * filename, and a backdrop must never claim a slot of its own.
+ */
+export interface EditorBackdrop {
+  id: string;
+  file: File;
+  label: string;
+  /** Object URL, for the preview canvas. */
+  url: string;
+}
+
 export interface EditorImage {
   id: string;
   file: File;
@@ -115,6 +128,12 @@ interface PersistedSettings {
 
 interface EditorStore extends PersistedSettings {
   images: EditorImage[];
+  /**
+   * Attached plates. Not persisted — a File and its object URL mean nothing
+   * after a reload, exactly like `images`. The moment keeps the id, so a
+   * reloaded moment shows no backdrop until the plate is attached again.
+   */
+  backdrops: EditorBackdrop[];
   audio: AudioTrack | null;
   export: ExportState;
 
@@ -139,6 +158,9 @@ interface EditorStore extends PersistedSettings {
   addMoment: (candidate: MomentCandidate) => void;
   addBlankMoment: (start: number) => void;
   updateMoment: (id: string, patch: Partial<TextMoment>) => void;
+  /** Attaches a plate to a moment, keeping the file for upload at render time. */
+  attachBackdrop: (momentId: string, file: File) => void;
+  detachBackdrop: (momentId: string) => void;
   removeMoment: (id: string) => void;
   clearMoments: () => void;
 
@@ -188,6 +210,7 @@ export const useEditorStore = create<EditorStore>()(
       transcript: "",
       candidates: [],
       moments: [],
+      backdrops: [],
 
       settings: DEFAULT_SETTINGS,
       zoom: "in",
@@ -406,6 +429,44 @@ export const useEditorStore = create<EditorStore>()(
           export: invalidate(state),
         })),
 
+      attachBackdrop: (momentId, file) => {
+        const id = `bd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const url = URL.createObjectURL(file);
+        set((state) => ({
+          backdrops: [...state.backdrops, { id, file, label: file.name, url }],
+          moments: state.moments.map((moment) =>
+            moment.id === momentId ? { ...moment, backdropId: id } : moment
+          ),
+          export: invalidate(state),
+        }));
+      },
+
+      detachBackdrop: (momentId) => {
+        set((state) => {
+          const dropped = state.moments.find((m) => m.id === momentId)?.backdropId;
+          const moments = state.moments.map((moment) =>
+            moment.id === momentId
+              ? { ...moment, backdropId: undefined, backdropImage: undefined }
+              : moment
+          );
+          // Revoked only once nothing else points at it: two moments can share a
+          // plate, and freeing a URL still in use would blank the other preview.
+          const stillUsed = moments.some((moment) => moment.backdropId === dropped);
+          if (dropped && !stillUsed) {
+            const entry = state.backdrops.find((item) => item.id === dropped);
+            if (entry) URL.revokeObjectURL(entry.url);
+          }
+          return {
+            moments,
+            backdrops:
+              dropped && !stillUsed
+                ? state.backdrops.filter((item) => item.id !== dropped)
+                : state.backdrops,
+            export: invalidate(state),
+          };
+        });
+      },
+
       removeMoment: (id) =>
         set((state) => ({
           moments: state.moments.filter((moment) => moment.id !== id),
@@ -450,6 +511,20 @@ export const useEditorStore = create<EditorStore>()(
             state.images
               .filter((image) => used.has(image.id))
               .map((image) => ({ key: image.id, kind: "image", file: image.file }));
+
+          // Plates ride the same upload as the clips — they land in `images/`
+          // and the renderer resolves them there, so nothing new was needed
+          // server-side. Only the ones a moment actually points at are sent.
+          const wantedPlates = new Set(
+            state.moments
+              .filter((moment) => moment.text.trim().length > 0)
+              .map((moment) => moment.backdropId)
+              .filter(Boolean) as string[]
+          );
+          for (const plate of state.backdrops) {
+            if (!wantedPlates.has(plate.id)) continue;
+            uploads.push({ key: plate.id, kind: "image", file: plate.file });
+          }
 
           if (state.audio) {
             uploads.push({ key: "__audio", kind: "audio", file: state.audio.file });
@@ -503,7 +578,17 @@ export const useEditorStore = create<EditorStore>()(
             audio: state.audio ? (stored.get("__audio") ?? null) : null,
             total: timeline.total,
             settings: state.settings,
-            moments: state.moments.filter((moment) => moment.text.trim().length > 0),
+            // The plate's stored name is stamped on here rather than kept in
+            // the store: `backdropId` addresses the browser's copy, and only
+            // the server name means anything to the renderer.
+            moments: state.moments
+              .filter((moment) => moment.text.trim().length > 0)
+              .map((moment) => ({
+                ...moment,
+                backdropImage: moment.backdropId
+                  ? stored.get(moment.backdropId)
+                  : undefined,
+              })),
           };
 
           const started = (await postJson(

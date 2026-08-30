@@ -32,6 +32,8 @@ interface Props {
   onToggleImage: (id: string) => void;
   /** Drag-to-position. Fractions of the frame, addressing the text's centre. */
   onMoveMoment: (id: string, x: number, y: number) => void;
+  /** Attached plates, by id, so the preview composites what the export will. */
+  backdrops: { id: string; url: string }[];
 }
 
 export function PreviewStage({
@@ -47,6 +49,7 @@ export function PreviewStage({
   thumbnails,
   onToggleImage,
   onMoveMoment,
+  backdrops,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -144,6 +147,24 @@ export function PreviewStage({
   const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   /** Set once the pointer actually moves, so a plain click still toggles play. */
   const draggedRef = useRef(false);
+
+  /**
+   * Decoded plates, kept in a ref for the same reason the moments are: the draw
+   * loop must not be rebuilt when one arrives, and an <img> that is still
+   * loading simply isn't in the map yet, so nothing is drawn for it.
+   */
+  const plateRef = useRef(new Map<string, HTMLImageElement>());
+  useEffect(() => {
+    const map = plateRef.current;
+    const wanted = new Set(backdrops.map((plate) => plate.id));
+    for (const id of [...map.keys()]) if (!wanted.has(id)) map.delete(id);
+    for (const plate of backdrops) {
+      if (map.has(plate.id)) continue;
+      const image = new Image();
+      image.onload = () => map.set(plate.id, image);
+      image.src = plate.url;
+    }
+  }, [backdrops]);
 
   const cacheRef = useRef<BitmapCache | null>(null);
   useEffect(() => {
@@ -379,7 +400,14 @@ export function PreviewStage({
         applyLook(context, clip && clip.kind !== "avatar" ? film : "off", time, paint);
         // Text goes on above the look, as it does in the render: grain belongs
         // to the picture, and a caption is not part of the picture.
-        drawMoments(context, momentsRef.current, time, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+        drawMoments(
+          context,
+          momentsRef.current,
+          time,
+          PREVIEW_WIDTH,
+          PREVIEW_HEIGHT,
+          plateRef.current
+        );
       }
 
       if (playheadRef.current && total > 0) {

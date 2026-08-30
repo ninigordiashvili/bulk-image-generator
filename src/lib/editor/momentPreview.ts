@@ -60,7 +60,9 @@ export function drawMoments(
   moments: TextMoment[],
   time: number,
   width: number,
-  height: number
+  height: number,
+  /** Loaded plates by `backdropId`. Missing ones simply don't draw. */
+  backdrops?: Map<string, CanvasImageSource>
 ): void {
   for (const moment of momentsAt(moments, time)) {
     if (!moment.text.trim()) continue;
@@ -81,6 +83,27 @@ export function drawMoments(
       context.globalAlpha = darken * fade;
       context.fillStyle = "#000000";
       context.fillRect(0, 0, width, height);
+    }
+
+    // The attached plate. Drawn after the flat dim and before the text, which
+    // is the order the export composites them — see server/editor/textOverlay.ts,
+    // where the same three go base, overlay, drawtext.
+    const plate = moment.backdropId ? backdrops?.get(moment.backdropId) : undefined;
+    if (plate) {
+      // Full width, sat against the bottom edge — matching `overlay=y=H-h`. The
+      // height either follows the setting or the plate's own aspect, the same
+      // choice the export makes with `scale=W:h or -2`.
+      const natural =
+        "naturalHeight" in plate
+          ? { w: plate.naturalWidth, h: plate.naturalHeight }
+          : { w: width, h: height };
+      const band = moment.backdropHeight;
+      const drawnHeight =
+        band && band > 0.001
+          ? height * Math.min(1, band)
+          : (width * natural.h) / Math.max(1, natural.w);
+      context.globalAlpha = fade * Math.max(0, Math.min(1, moment.backdropOpacity ?? 1));
+      context.drawImage(plate, 0, height - drawnHeight, width, drawnHeight);
     }
 
     const look = styleOf(moment.style);

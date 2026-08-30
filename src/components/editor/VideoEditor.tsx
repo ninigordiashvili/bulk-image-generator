@@ -23,6 +23,7 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
   const fileName = useEditorStore((state) => state.fileName);
   const exportState = useEditorStore((state) => state.export);
   const updateMoment = useEditorStore((state) => state.updateMoment);
+  const backdrops = useEditorStore((state) => state.backdrops);
 
   const addImages = useEditorStore((state) => state.addImages);
   const removeImage = useEditorStore((state) => state.removeImage);
@@ -115,6 +116,7 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
             thumbnails={thumbnails}
             onToggleImage={toggleImage}
             onMoveMoment={(id, x, y) => updateMoment(id, { x, y })}
+            backdrops={backdrops}
           />
 
           <CueList

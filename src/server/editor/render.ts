@@ -11,7 +11,7 @@ import type {
   TextMoment,
 } from "@/types/editor";
 import { MAX_MOMENTS } from "@/types/editor";
-import { overlayChain } from "./textOverlay";
+import { overlayChain, scrimGraph } from "./textOverlay";
 import { FFMPEG, FfmpegError, probeDuration, run } from "./ffmpeg";
 import { outputPath, resolveInside, setPhase, type Job } from "./jobs";
 
@@ -322,7 +322,9 @@ export function segmentArgs(
   segment: PlannedSegment,
   settings: RenderSettings,
   outDir: string,
-  moments: TextMoment[] = []
+  moments: TextMoment[] = [],
+  /** Absolute paths of the backdrop plates, by the name moments refer to. */
+  backdrops: Map<string, string> = new Map()
 ): string[] {
   const { width, height, fps } = settings;
   const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y"];
@@ -365,7 +367,52 @@ export function segmentArgs(
   // caption is not part of the picture.
   const text = overlayChain(moments, segment.startSeconds, segment.endSeconds, height);
 
-  args.push("-vf", [chain, film, text, "format=yuv420p"].filter(Boolean).join(","));
+  // Backdrop plates come in as extra inputs, one per distinct image used by a
+  // moment that shows in this segment. Adding them is what forces the switch
+  // from `-vf` to `-filter_complex`; nothing about frame count or timing moves,
+  // and `-frames:v` below still decides the length either way.
+  const used = new Map<string, number>();
+  for (const moment of moments) {
+    const file = moment.backdropImage;
+    if (!file || used.has(file) || !backdrops.has(file)) continue;
+    const end = moment.start + moment.duration;
+    if (end <= segment.startSeconds || moment.start >= segment.endSeconds) continue;
+    used.set(file, 0);
+  }
+
+  const plates = [...used.keys()];
+  plates.forEach((file, index) => {
+    // Looped so the still is an endless stream for `overlay` to draw from, and
+    // at the output rate so its own clock matches the segment's.
+    args.push("-loop", "1", "-framerate", String(fps), "-i", backdrops.get(file)!);
+    used.set(file, index + 1);
+  });
+
+  const scrim = plates.length
+    ? scrimGraph(
+        moments,
+        segment.startSeconds,
+        segment.endSeconds,
+        "base",
+        "plated",
+        used,
+        width,
+        height
+      )
+    : null;
+
+  if (scrim) {
+    const before = [chain, film].filter(Boolean).join(",");
+    const after = [text, "format=yuv420p"].filter(Boolean).join(",");
+    args.push(
+      "-filter_complex",
+      `[0:v]${before}[base];${scrim};[plated]${after}[out]`,
+      "-map",
+      "[out]"
+    );
+  } else {
+    args.push("-vf", [chain, film, text, "format=yuv420p"].filter(Boolean).join(","));
+  }
 
   args.push(
     "-frames:v", String(segment.frames),
@@ -540,7 +587,30 @@ export async function renderJob(job: Job, request: RenderRequest): Promise<void>
       .slice(0, MAX_MOMENTS)
       .sort((a, b) => a.start - b.start);
 
-    await renderSegments(job, segments, settings, segmentDir, controller, moments);
+    // Backdrop plates are validated the same way clip images are: the names
+    // come back over the wire, so each is resolved inside the job's own
+    // directory before ffmpeg is pointed at it.
+    const backdrops = new Map<string, string>();
+    for (const moment of moments) {
+      const file = moment.backdropImage;
+      if (!file || backdrops.has(file)) continue;
+      const full = resolveInside(job, "images", file);
+      if (!full) throw new Error(`Rejected backdrop name "${file}".`);
+      await fs.access(full).catch(() => {
+        throw new Error(`Backdrop "${file}" was never uploaded.`);
+      });
+      backdrops.set(file, full);
+    }
+
+    await renderSegments(
+      job,
+      segments,
+      settings,
+      segmentDir,
+      controller,
+      moments,
+      backdrops
+    );
 
     setPhase(job, "muxing", "Joining clips and adding audio…");
 
@@ -613,7 +683,8 @@ async function renderSegments(
   settings: RenderSettings,
   segmentDir: string,
   controller: AbortController,
-  moments: TextMoment[]
+  moments: TextMoment[],
+  backdrops: Map<string, string>
 ): Promise<void> {
   const { signal } = controller;
   let next = 0;
@@ -626,7 +697,11 @@ async function renderSegments(
       if (index >= segments.length) return;
       const segment = segments[index];
       try {
-        await run(FFMPEG, segmentArgs(segment, settings, segmentDir, moments), { signal });
+        await run(
+          FFMPEG,
+          segmentArgs(segment, settings, segmentDir, moments, backdrops),
+          { signal }
+        );
       } catch (error) {
         if (signal.aborted) return;
         const name = segment.source ? path.basename(segment.source) : "black gap";

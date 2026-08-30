@@ -26,6 +26,9 @@ export function TextMoments({ disabled }: { disabled: boolean }) {
   const transcript = useEditorStore((state) => state.transcript);
   const candidates = useEditorStore((state) => state.candidates);
   const moments = useEditorStore((state) => state.moments);
+  const backdrops = useEditorStore((state) => state.backdrops);
+  const attachBackdrop = useEditorStore((state) => state.attachBackdrop);
+  const detachBackdrop = useEditorStore((state) => state.detachBackdrop);
   const setTranscript = useEditorStore((state) => state.setTranscript);
   const addMoment = useEditorStore((state) => state.addMoment);
   const addBlankMoment = useEditorStore((state) => state.addBlankMoment);
@@ -115,7 +118,12 @@ export function TextMoments({ disabled }: { disabled: boolean }) {
           key={moment.id}
           moment={moment}
           disabled={disabled}
+          backdropLabel={
+            backdrops.find((plate) => plate.id === moment.backdropId)?.label ?? null
+          }
           onChange={(patch) => updateMoment(moment.id, patch)}
+          onAttach={(file) => attachBackdrop(moment.id, file)}
+          onDetach={() => detachBackdrop(moment.id)}
           onRemove={() => removeMoment(moment.id)}
         />
       ))}
@@ -142,12 +150,18 @@ export function TextMoments({ disabled }: { disabled: boolean }) {
 function MomentRow({
   moment,
   disabled,
+  backdropLabel,
   onChange,
+  onAttach,
+  onDetach,
   onRemove,
 }: {
   moment: TextMoment;
   disabled: boolean;
+  backdropLabel: string | null;
   onChange: (patch: Partial<TextMoment>) => void;
+  onAttach: (file: File) => void;
+  onDetach: () => void;
   onRemove: () => void;
 }) {
   const [startDraft, setStartDraft] = useState<string | null>(null);
@@ -270,6 +284,94 @@ function MomentRow({
             className="w-full accent-[var(--accent)] disabled:opacity-40"
           />
         </label>
+
+        {/* The plate. An effect on this moment: it appears and fades with the
+            text, and never takes a slot on the timeline the way a dropped
+            image would. */}
+        <div className="col-span-2 space-y-1.5">
+          <span className="flex items-baseline justify-between text-[11px] text-muted">
+            <span>Background image</span>
+            {backdropLabel && (
+              <button
+                type="button"
+                className="text-[11px] text-muted hover:text-foreground disabled:opacity-40"
+                disabled={disabled}
+                onClick={onDetach}
+              >
+                Remove
+              </button>
+            )}
+          </span>
+
+          {backdropLabel ? (
+            <p className="truncate rounded-md bg-surface-2 px-2 py-1 text-[11px] text-foreground">
+              {backdropLabel}
+            </p>
+          ) : (
+            <label className="block cursor-pointer rounded-md border border-dashed border-white/15 px-2 py-1.5 text-center text-[11px] text-muted hover:border-white/30">
+              Attach a plate (PNG with transparency)
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                disabled={disabled}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) onAttach(file);
+                  // Cleared so re-picking the same file fires again.
+                  event.target.value = "";
+                }}
+              />
+            </label>
+          )}
+
+          {backdropLabel && (
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-[11px] text-muted">
+                <span className="flex items-baseline justify-between">
+                  <span>Height</span>
+                  <span className="font-mono text-foreground">
+                    {moment.backdropHeight
+                      ? `${Math.round(moment.backdropHeight * 100)}%`
+                      : "auto"}
+                  </span>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={moment.backdropHeight ?? 0}
+                  disabled={disabled}
+                  onChange={(event) =>
+                    onChange({ backdropHeight: Number(event.target.value) || undefined })
+                  }
+                  className="w-full accent-[var(--accent)] disabled:opacity-40"
+                />
+              </label>
+              <label className="text-[11px] text-muted">
+                <span className="flex items-baseline justify-between">
+                  <span>Opacity</span>
+                  <span className="font-mono text-foreground">
+                    {Math.round((moment.backdropOpacity ?? 1) * 100)}%
+                  </span>
+                </span>
+                <input
+                  type="range"
+                  min={0.05}
+                  max={1}
+                  step={0.05}
+                  value={moment.backdropOpacity ?? 1}
+                  disabled={disabled}
+                  onChange={(event) =>
+                    onChange({ backdropOpacity: Number(event.target.value) })
+                  }
+                  className="w-full accent-[var(--accent)] disabled:opacity-40"
+                />
+              </label>
+            </div>
+          )}
+        </div>
 
         <label className="text-[11px] text-muted">
           <span className="flex items-baseline justify-between">

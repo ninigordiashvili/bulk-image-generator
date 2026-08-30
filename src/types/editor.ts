@@ -216,6 +216,27 @@ export interface TextMoment {
   style?: MomentStyle;
   /** How much the picture behind is dimmed, 0 to 0.8. */
   darken: number;
+  /**
+   * An image standing behind the text — a gradient plate, a bar, whatever was
+   * attached. It belongs to the moment: it appears and fades with it, so it is
+   * an effect on the text rather than a clip of its own, and it never takes a
+   * slot on the timeline.
+   *
+   * Two references, because the two sides address it differently. `backdropId`
+   * points at the file held in the browser, which is what the preview draws.
+   * `backdropImage` is the name it was stored under on the server, filled in
+   * during upload and the only one the renderer reads.
+   */
+  backdropId?: string;
+  backdropImage?: string;
+  /**
+   * Height as a fraction of the frame, so the plate scales with the export
+   * rather than being pinned to the pixels it was drawn at. Absent means full
+   * width at the image's own aspect.
+   */
+  backdropHeight?: number;
+  /** Scales the whole plate's opacity, 0 to 1. Its own alpha is kept. */
+  backdropOpacity?: number;
   /** Text height as a fraction of frame height, so it scales with the export. */
   size: number;
   /**
@@ -245,6 +266,13 @@ export const MOMENT_DEFAULTS = {
   size: 0.12,
   x: 0.5,
   y: 0.5,
+  // 510 of 1080, the height that was asked for, expressed so it holds at any
+  // export size. Off by default: it is an effect, not a fixture.
+  backdropHeight: 0,
+  backdropOpacity: 1,
 };
+
+/** The height a backdrop takes when it is first switched on. */
+export const BACKDROP_DEFAULT_HEIGHT = 510 / 1080;
 
 export const MAX_MOMENTS = 60;

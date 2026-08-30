@@ -204,6 +204,113 @@ export function momentChain(
  * before the segment did: the picture changing underneath must not interrupt
  * the text on top of it.
  */
+/**
+ * The backdrop overlays for the moments in a segment, as filter_complex links.
+ *
+ * Why an overlay rather than something drawn in the chain: `drawbox` cannot
+ * make a gradient — its alpha takes no expression — and `geq` measured 139x
+ * slower than the baseline encode, which would turn a sixteen-minute render
+ * into a day. Overlaying a prepared image measured 0.02s over the same 120
+ * frames, so the plate is supplied rather than generated.
+ *
+ * `inputs` maps a stored backdrop filename to the ffmpeg input index it was
+ * added as. Moments sharing one plate share one input, split as many ways as
+ * they need — a batch that uses the same gradient throughout decodes it once.
+ *
+ * Returns null when nothing in this segment has a backdrop, so the ordinary
+ * single-chain path is left exactly as it was.
+ */
+export function scrimGraph(
+  moments: TextMoment[],
+  segmentStart: number,
+  segmentEnd: number,
+  inLabel: string,
+  outLabel: string,
+  inputs: Map<string, number>,
+  frameWidth: number,
+  frameHeight: number
+): string | null {
+  const wanted = moments
+    .filter((moment) => moment.backdropImage && inputs.has(moment.backdropImage))
+    .filter((moment) => {
+      const end = moment.start + moment.duration;
+      return end > segmentStart && moment.start < segmentEnd;
+    })
+    .map((moment) => ({ moment, start: moment.start - segmentStart }));
+
+  if (wanted.length === 0) return null;
+
+  const parts: string[] = [];
+
+  // One split per input, sized to how many moments draw from it.
+  const perInput = new Map<string, number>();
+  for (const { moment } of wanted) {
+    const key = moment.backdropImage!;
+    perInput.set(key, (perInput.get(key) ?? 0) + 1);
+  }
+  const taken = new Map<string, number>();
+  for (const [file, count] of perInput) {
+    const index = inputs.get(file)!;
+    const tags = Array.from({ length: count }, (_, k) => `[bd${index}_${k}]`).join("");
+    parts.push(
+      count === 1
+        ? `[${index}:v]null${tags}`
+        : `[${index}:v]split=${count}${tags}`
+    );
+    taken.set(file, 0);
+  }
+
+  let carry = inLabel;
+  wanted.forEach(({ moment, start }, order) => {
+    const file = moment.backdropImage!;
+    const index = inputs.get(file)!;
+    const nth = taken.get(file)!;
+    taken.set(file, nth + 1);
+
+    const fade = fadesOf(moment);
+    const end = start + moment.duration;
+    const height = moment.backdropHeight;
+    const opacity = Math.max(0, Math.min(1, moment.backdropOpacity ?? 1));
+
+    // Whole pixels, worked out from the output size here rather than left as an
+    // expression: the plate is scaled once at init, and `scale` wants numbers.
+    // Full width always — a backdrop that did not span the frame would show its
+    // own edges against the picture.
+    const bandPx =
+      height && height > 0.001
+        ? Math.max(2, Math.round(frameHeight * Math.min(1, height)))
+        : null;
+
+    const chain = [
+      "format=rgba",
+      // -2 keeps the plate's own aspect at an even height, which the encoder
+      // needs; a stated height overrides it.
+      `scale=${frameWidth}:${bandPx ?? -2}:flags=bicubic`,
+      fade.in > 0.001
+        ? `fade=t=in:st=${fixed(Math.max(0, start))}:d=${fixed(fade.in)}:alpha=1`
+        : "",
+      fade.out > 0.001
+        ? `fade=t=out:st=${fixed(end - fade.out)}:d=${fixed(fade.out)}:alpha=1`
+        : "",
+      // `fade` ramps alpha to full; this scales the plate down to the opacity
+      // asked for without flattening the gradient inside it.
+      opacity < 0.999 ? `colorchannelmixer=aa=${opacity.toFixed(3)}` : "",
+    ]
+      .filter(Boolean)
+      .join(",");
+
+    const next = order === wanted.length - 1 ? outLabel : `bdl${order}`;
+    parts.push(`[bd${index}_${nth}]${chain}[bds${order}]`);
+    parts.push(
+      `[${carry}][bds${order}]overlay=x=0:y=H-h:format=auto` +
+        `:enable='between(t,${fixed(Math.max(0, start))},${fixed(end)})'[${next}]`
+    );
+    carry = next;
+  });
+
+  return parts.join(";");
+}
+
 export function overlayChain(
   moments: TextMoment[],
   segmentStart: number,
