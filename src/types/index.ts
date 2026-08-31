@@ -266,7 +266,20 @@ export type GenerateResponse =
       retryable?: boolean;
     };
 
-export const MAX_PROMPTS = 150;
+/**
+ * How many prompt lines one batch may hold.
+ *
+ * The ceiling that matters is not this number but this number times
+ * `imagesPerPrompt`, because every generated image is held in memory as base64
+ * *and* written to IndexedDB — roughly 1.5MB each. 300 single-image prompts is
+ * about 450MB and comfortable; 300 at ten images each is 4.5GB and would take
+ * the tab down. The multiplier is the thing to watch, and it is capped at 10
+ * separately.
+ *
+ * Raising it costs nothing on its own: the queue paces the work either way, and
+ * a longer list only means the run finishes later.
+ */
+export const MAX_PROMPTS = 300;
 export const MAX_PROMPT_CHARS = 500;
 
 // ---------------------------------------------------------------------------
