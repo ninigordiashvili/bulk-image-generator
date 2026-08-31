@@ -53,9 +53,12 @@ export function VideoBatch() {
   const retryFailedJobs = useVideoStore((state) => state.retryFailedJobs);
   const hydrateGallery = useVideoStore((state) => state.hydrateGallery);
 
-  const accountId = useGenerationStore((state) => state.settings.accountId);
-  // The account chosen on the Images tab decides which video models can run.
-  const provider = useGenerationStore((state) => state.settings.provider);
+  // The video tab's own account gates starting a video run.
+  const accountId = useVideoStore((state) => state.accountId);
+  // The video tab's own account decides which models can run here. It used to
+  // read the image tab's, which is how choosing an account for one moved the
+  // other.
+  const provider = useVideoStore((state) => state.provider);
 
   // Switching account provider strands every row on a model the new account
   // cannot reach — the row's dropdown no longer lists it, so it renders blank

@@ -25,8 +25,10 @@ import {
   clampToModel,
   isAudioDriven,
   videoModel,
+  defaultVideoModelFor,
 } from "@/lib/videoModels";
 import { GenerationQueue } from "@/services/GenerationQueue";
+import type { Provider } from "@/types";
 import {
   downloadVideoBlob,
   generateVideoOnVertex,
@@ -169,6 +171,15 @@ interface VideoStore {
   setRetries: (value: number) => void;
 
   hydrateGallery: () => Promise<void>;
+  /**
+   * The video tab's own account. Separate from the image tab's on purpose: the
+   * two used to share one, so picking kie.ai for a video batch also moved the
+   * image tab — and any image batch running on it — onto that account.
+   */
+  provider: Provider;
+  accountId: string;
+  setAccount: (patch: { provider?: Provider; accountId?: string }) => void;
+
   startGeneration: () => void;
   cancelGeneration: () => void;
   retryJob: (jobId: string) => void;
@@ -275,6 +286,8 @@ export const useVideoStore = create<VideoStore>()(
         resolution: videoModel(DEFAULT_VIDEO_MODEL).defaultResolution,
         aspectRatio: videoModel(DEFAULT_VIDEO_MODEL).defaultAspectRatio,
       },
+      provider: "kie",
+      accountId: "",
       concurrency: 3,
       retries: 1,
       creditRates: {},
@@ -426,6 +439,22 @@ export const useVideoStore = create<VideoStore>()(
         set((state) => ({ defaults: { ...state.defaults, ...patch } }));
       },
 
+      setAccount: (patch) =>
+        set((state) => {
+          const provider = patch.provider ?? state.provider;
+          // A provider change carries the model with it: the old one belongs to
+          // a catalog this account cannot reach.
+          const model =
+            provider === state.provider
+              ? state.defaults.model
+              : defaultVideoModelFor(provider);
+          return {
+            provider,
+            accountId: patch.accountId ?? state.accountId,
+            defaults: { ...state.defaults, model },
+          };
+        }),
+
       setConcurrency: (concurrency) => {
         set({ concurrency });
         queue?.setConcurrency(concurrency);
@@ -444,6 +473,16 @@ export const useVideoStore = create<VideoStore>()(
 
       startGeneration: () => {
         const { shots, concurrency, retries } = get();
+
+        /**
+         * The account this run bills, frozen at the moment it starts.
+         *
+         * It used to be read per job from the image store, which the two tabs
+         * share — so choosing a different account for an image batch moved a
+         * running video batch onto it mid-flight, billing clips to the wrong
+         * place. The account is picked once, here, and the run keeps it.
+         */
+        const billing = { provider: get().provider, accountId: get().accountId };
         const runnable = shots.filter(isRunnable);
         if (runnable.length === 0) return;
 
@@ -472,14 +511,14 @@ export const useVideoStore = create<VideoStore>()(
             if (!shot) {
               return { ok: false, error: "Shot was removed.", retryable: false };
             }
-            // The account lives in the image store — one kie key serves both.
-            const accountId = useGenerationStore.getState().settings.accountId;
+            // Taken from the snapshot above, never re-read: see `billing`.
+            const accountId = billing.accountId;
             if (!accountId) {
               return { ok: false, error: "No account selected.", retryable: false };
             }
 
             const spec = videoModel(shot.model);
-            const provider = useGenerationStore.getState().settings.provider;
+            const provider = billing.provider;
 
             if (spec.provider !== provider) {
               return {
@@ -776,6 +815,8 @@ export const useVideoStore = create<VideoStore>()(
       // rebuilt by dropping the images again, and clips live in IndexedDB.
       partialize: (state) => ({
         defaults: state.defaults,
+        provider: state.provider,
+        accountId: state.accountId,
         concurrency: state.concurrency,
         retries: state.retries,
         creditRates: state.creditRates,

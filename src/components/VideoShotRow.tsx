@@ -3,7 +3,6 @@
 import Image from "next/image";
 import { useState } from "react";
 import { isAudioDriven, videoModel, videoModelsFor } from "@/lib/videoModels";
-import { useGenerationStore } from "@/store/generationStore";
 import { formatTime } from "@/lib/editor/format";
 import { creditsPerImage, formatCredits } from "@/lib/pricing";
 import { shotSize, useVideoStore } from "@/store/videoStore";
@@ -30,8 +29,8 @@ export function VideoShotRow({
   job?: GenerationJob;
   disabled: boolean;
 }) {
-  // Same account, same providers as the Images tab.
-  const provider = useGenerationStore((state) => state.settings.provider);
+  // The video tab's own account, not the image tab's.
+  const provider = useVideoStore((state) => state.provider);
   const updateShot = useVideoStore((state) => state.updateShot);
   const removeShot = useVideoStore((state) => state.removeShot);
   const retryJob = useVideoStore((state) => state.retryJob);

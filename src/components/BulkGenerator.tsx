@@ -117,7 +117,7 @@ export function BulkGenerator() {
         <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(300px,1fr)]">
           <VideoBatch />
           <div>
-            <AccountSelector disabled={videoRunning} />
+            <AccountSelector disabled={videoRunning} scope="videos" />
           </div>
         </div>
       ) : (

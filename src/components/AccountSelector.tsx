@@ -13,13 +13,34 @@ import {
 } from "@/lib/vertexEstimate";
 import { MAX_PROMPTS } from "@/types";
 
-export function AccountSelector({ disabled }: { disabled: boolean }) {
+/**
+ * `scope` says whose account is being chosen. The two tabs keep separate
+ * selections: they used to share one, so picking an account for a video batch
+ * silently moved the image tab — and any batch running on it — onto that
+ * account.
+ */
+export function AccountSelector({
+  disabled,
+  scope = "images",
+}: {
+  disabled: boolean;
+  scope?: "images" | "videos";
+}) {
   const accounts = useGenerationStore((state) => state.accounts);
   const accountProblems = useGenerationStore((state) => state.accountProblems);
   const accountsError = useGenerationStore((state) => state.accountsError);
   const accountsLoading = useGenerationStore((state) => state.accountsLoading);
-  const accountId = useGenerationStore((state) => state.settings.accountId);
-  const provider = useGenerationStore((state) => state.settings.provider);
+  const imageAccountId = useGenerationStore((state) => state.settings.accountId);
+  const imageProvider = useGenerationStore((state) => state.settings.provider);
+  const videoAccountId = useVideoStore((state) => state.accountId);
+  const videoProvider = useVideoStore((state) => state.provider);
+  const setVideoAccount = useVideoStore((state) => state.setAccount);
+
+  const forVideos = scope === "videos";
+  const accountId = forVideos ? videoAccountId : imageAccountId;
+  const provider = forVideos ? videoProvider : imageProvider;
+  const choose = (next: { provider: "kie" | "vertex"; accountId: string }) =>
+    forVideos ? setVideoAccount(next) : setSettings(next);
   const credits = useGenerationStore((state) => state.credits);
   const creditsError = useGenerationStore((state) => state.creditsError);
   const setSettings = useGenerationStore((state) => state.setSettings);
@@ -29,6 +50,20 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
   useEffect(() => {
     void loadAccounts();
   }, [loadAccounts]);
+
+  // The video tab keeps its own selection, which starts empty and survives
+  // reloads — so it has to be checked against the accounts that actually
+  // exist, the way the image tab's is checked inside `loadAccounts`. Left
+  // alone it would sit blank, or point at an account since removed.
+  useEffect(() => {
+    if (!forVideos || accounts.length === 0) return;
+    const valid = accounts.some(
+      (account) => account.id === videoAccountId && account.provider === videoProvider
+    );
+    if (valid) return;
+    const first = accounts[0];
+    setVideoAccount({ provider: first.provider ?? "kie", accountId: first.id });
+  }, [forVideos, accounts, videoAccountId, videoProvider, setVideoAccount]);
 
   // Matched on provider too: both providers have an account called "main".
   const selected = accounts.find(
@@ -45,9 +80,10 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
   const shots = useVideoStore((state) => state.shots);
 
   const limits = selected?.limits;
-  const imageCount = isVertex
-    ? Math.min(parsePrompts(promptText).length, MAX_PROMPTS) * settings.imagesPerPrompt
-    : 0;
+  const imageCount =
+    isVertex && !forVideos
+      ? Math.min(parsePrompts(promptText).length, MAX_PROMPTS) * settings.imagesPerPrompt
+      : 0;
   const imagePlan =
     isVertex && limits && imageCount > 0
       ? estimateImages(
@@ -67,7 +103,7 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
   const isVertexVideo = isVertex && !!limits && videoSpec.provider === "vertex";
 
   const videoPlan =
-    isVertexVideo && shots.length > 0
+    isVertexVideo && forVideos && shots.length > 0
       ? estimateVideos(
           shots.map((shot) => shot.duration),
           videoSpec.requestModel,
@@ -77,7 +113,7 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
       : null;
 
   const perClipPlan =
-    isVertexVideo && shots.length === 0
+    isVertexVideo && forVideos && shots.length === 0
       ? estimateVideos(
           [videoDefaults.duration],
           videoSpec.requestModel,
@@ -89,7 +125,9 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
   return (
     <section className="panel">
       <div className="mb-3 flex items-baseline justify-between gap-2">
-        <h2 className="panel-title mb-0">Account</h2>
+        <h2 className="panel-title mb-0">
+          {forVideos ? "Video account" : "Image account"}
+        </h2>
         {selected && (
           <span className="font-mono text-[11px] text-muted">{selected.keyHint}</span>
         )}
@@ -104,7 +142,7 @@ export function AccountSelector({ disabled }: { disabled: boolean }) {
         disabled={disabled || accountsLoading || accounts.length === 0}
         onChange={(event) => {
           const [nextProvider, ...rest] = event.target.value.split(":");
-          setSettings({
+          choose({
             provider: nextProvider === "vertex" ? "vertex" : "kie",
             accountId: rest.join(":"),
           });

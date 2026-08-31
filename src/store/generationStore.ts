@@ -367,6 +367,26 @@ export const useGenerationStore = create<GenerationStore>()(
 
       startGeneration: () => {
         const { settings, queueConfig, promptText, characters } = get();
+
+        /**
+         * The settings this run will use, frozen at the moment it starts.
+         *
+         * Every job used to re-read the live store, which meant a batch was
+         * only ever using whatever was selected *now* rather than what was
+         * chosen when it was started. Picking a different account for a video
+         * batch in the other tab therefore moved a running image batch onto
+         * that account mid-flight — real credits, billed to the wrong place —
+         * and because switching provider also reassigns the model, the images
+         * changed model and aspect ratio partway through too.
+         *
+         * Nothing in here is read from the store again. The characters are
+         * copied for the same reason: editing one during a run must not change
+         * what the rest of the run generates.
+         */
+        const locked = {
+          settings: { ...settings, modelInputs: { ...settings.modelInputs } },
+          characters: characters.map((character) => ({ ...character })),
+        };
         // Hard cap: anything past MAX_PROMPTS is dropped, and the input warns about it.
         const prompts = parsePrompts(promptText).slice(0, MAX_PROMPTS);
         if (prompts.length === 0) return;
@@ -398,8 +418,7 @@ export const useGenerationStore = create<GenerationStore>()(
           concurrency: queueConfig.concurrency,
           retries: queueConfig.retries,
           runJob: async (job, signal) => {
-            const state = get();
-            const current = state.settings;
+            const current = locked.settings;
             const model = activeModelId(current);
             if (!model) {
               return { ok: false, error: "No model id set.", retryable: false };
@@ -410,7 +429,7 @@ export const useGenerationStore = create<GenerationStore>()(
             // A text-to-image-only model has nowhere to put references, so they
             // are dropped rather than sent into a field it will reject.
             const limit = spec ? referenceLimit(spec) : 0;
-            const refs = state.characters
+            const refs = locked.characters
               .filter((character) => job.referencedCharacterIds.includes(character.id))
               .slice(0, Math.max(limit, 0));
 
