@@ -8,10 +8,12 @@ import type {
   RenderClip,
   RenderRequest,
   RenderSettings,
+  ShapeElement,
   TextMoment,
 } from "@/types/editor";
-import { MAX_MOMENTS } from "@/types/editor";
+import { MAX_MOMENTS, MAX_SHAPES } from "@/types/editor";
 import { overlayChain, scrimGraph } from "./textOverlay";
+import { shapeGraph, shapesInSegment } from "./shapeOverlay";
 import { FFMPEG, FfmpegError, probeDuration, run } from "./ffmpeg";
 import { outputPath, resolveInside, setPhase, type Job } from "./jobs";
 
@@ -323,8 +325,13 @@ export function segmentArgs(
   settings: RenderSettings,
   outDir: string,
   moments: TextMoment[] = [],
-  /** Absolute paths of the backdrop plates, by the name moments refer to. */
-  backdrops: Map<string, string> = new Map()
+  /**
+   * Absolute paths of every overlay plate, by the name that refers to it — the
+   * backdrops a moment attaches and the rasterised shape elements both, since
+   * they share one pool of ffmpeg input indexes.
+   */
+  backdrops: Map<string, string> = new Map(),
+  shapes: ShapeElement[] = []
 ): string[] {
   const { width, height, fps } = settings;
   const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y"];
@@ -379,6 +386,13 @@ export function segmentArgs(
     if (end <= segment.startSeconds || moment.start >= segment.endSeconds) continue;
     used.set(file, 0);
   }
+  // Shapes join the same pool: one shared index space, so a backdrop and a
+  // shape can never be handed the same input number.
+  for (const shape of shapesInSegment(shapes, segment.startSeconds, segment.endSeconds)) {
+    const file = shape.image;
+    if (!file || used.has(file) || !backdrops.has(file)) continue;
+    used.set(file, 0);
+  }
 
   const plates = [...used.keys()];
   plates.forEach((file, index) => {
@@ -388,25 +402,52 @@ export function segmentArgs(
     used.set(file, index + 1);
   });
 
+  // Composited bottom to top: the picture, the plates a moment attaches, the
+  // shape elements, then the dim and the text — which ride in `text` and so go
+  // on last, over the lot.
+  const stages: string[] = [];
+  let stage = "base";
+
   const scrim = plates.length
     ? scrimGraph(
         moments,
         segment.startSeconds,
         segment.endSeconds,
-        "base",
+        stage,
         "plated",
         used,
         width,
         height
       )
     : null;
-
   if (scrim) {
+    stages.push(scrim);
+    stage = "plated";
+  }
+
+  const drawn = plates.length
+    ? shapeGraph(
+        shapes,
+        segment.startSeconds,
+        segment.endSeconds,
+        stage,
+        "shaped",
+        used,
+        width,
+        height
+      )
+    : null;
+  if (drawn) {
+    stages.push(drawn);
+    stage = "shaped";
+  }
+
+  if (stages.length > 0) {
     const before = [chain, film].filter(Boolean).join(",");
     const after = [text, "format=yuv420p"].filter(Boolean).join(",");
     args.push(
       "-filter_complex",
-      `[0:v]${before}[base];${scrim};[plated]${after}[out]`,
+      `[0:v]${before}[base];${stages.join(";")};[${stage}]${after}[out]`,
       "-map",
       "[out]"
     );
@@ -590,9 +631,20 @@ export async function renderJob(job: Job, request: RenderRequest): Promise<void>
     // Backdrop plates are validated the same way clip images are: the names
     // come back over the wire, so each is resolved inside the job's own
     // directory before ffmpeg is pointed at it.
+    const shapes = (request.shapes ?? [])
+      .filter((shape) => shape.image && shape.duration > 0)
+      .slice(0, MAX_SHAPES)
+      .sort((a, b) => a.start - b.start);
+
     const backdrops = new Map<string, string>();
-    for (const moment of moments) {
-      const file = moment.backdropImage;
+    const plateNames = [
+      ...moments.map((moment) => moment.backdropImage),
+      // Shape plates go through the identical check — they are uploaded by the
+      // same path, into the same directory, and are just as much a filename
+      // that arrived over the wire.
+      ...shapes.map((shape) => shape.image),
+    ];
+    for (const file of plateNames) {
       if (!file || backdrops.has(file)) continue;
       const full = resolveInside(job, "images", file);
       if (!full) throw new Error(`Rejected backdrop name "${file}".`);
@@ -609,7 +661,8 @@ export async function renderJob(job: Job, request: RenderRequest): Promise<void>
       segmentDir,
       controller,
       moments,
-      backdrops
+      backdrops,
+      shapes
     );
 
     setPhase(job, "muxing", "Joining clips and adding audio…");
@@ -684,7 +737,8 @@ async function renderSegments(
   segmentDir: string,
   controller: AbortController,
   moments: TextMoment[],
-  backdrops: Map<string, string>
+  backdrops: Map<string, string>,
+  shapes: ShapeElement[]
 ): Promise<void> {
   const { signal } = controller;
   let next = 0;
@@ -699,7 +753,7 @@ async function renderSegments(
       try {
         await run(
           FFMPEG,
-          segmentArgs(segment, settings, segmentDir, moments, backdrops),
+          segmentArgs(segment, settings, segmentDir, moments, backdrops, shapes),
           { signal }
         );
       } catch (error) {

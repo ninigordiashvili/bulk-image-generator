@@ -10,6 +10,7 @@ import { ExportPanel } from "./ExportPanel";
 import { MediaIntake } from "./MediaIntake";
 import { PreviewStage } from "./PreviewStage";
 import { SettingsPanel } from "./SettingsPanel";
+import { ShapeElements } from "./ShapeElements";
 import { TextMoments } from "./TextMoments";
 
 export function VideoEditor({ renderable }: { renderable: boolean }) {
@@ -24,6 +25,8 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
   const exportState = useEditorStore((state) => state.export);
   const updateMoment = useEditorStore((state) => state.updateMoment);
   const backdrops = useEditorStore((state) => state.backdrops);
+  const shapes = useEditorStore((state) => state.shapes);
+  const moveShape = useEditorStore((state) => state.moveShape);
 
   const addImages = useEditorStore((state) => state.addImages);
   const removeImage = useEditorStore((state) => state.removeImage);
@@ -112,10 +115,12 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
             zoomAmountMotion={settings.zoomAmountMotion}
             film={settings.film}
             moments={moments}
+            shapes={shapes}
             maxStretch={settings.maxStretch}
             thumbnails={thumbnails}
             onToggleImage={toggleImage}
             onMoveMoment={(id, x, y) => updateMoment(id, { x, y })}
+            onMoveShape={moveShape}
             backdrops={backdrops}
           />
 
@@ -170,6 +175,8 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
           />
 
           <TextMoments disabled={busy} />
+
+          <ShapeElements disabled={busy} />
 
           {timeline.clips.length > 0 && (
             <p className="px-1 text-[11px] text-muted">

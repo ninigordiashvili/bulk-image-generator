@@ -6,11 +6,15 @@ import { analyseClip, classify, type Envelope } from "@/lib/editor/analyse";
 import { buildTimeline, clipZoom, type Timeline } from "@/lib/editor/timeline";
 import { parseTimestamp } from "@/lib/editor/timestamp";
 import { uploadAll } from "@/lib/editor/upload";
+import { rasteriseShape } from "@/lib/editor/shapes";
 import {
   DEFAULT_SETTINGS,
   MAX_IMAGES,
   MAX_MOMENTS,
+  MAX_SHAPES,
   MOMENT_DEFAULTS,
+  MOMENT_LEAD_SECONDS,
+  SHAPE_DEFAULTS,
   VIDEO_EXTENSIONS,
   type ClipKind,
   type CreateJobResponse,
@@ -20,6 +24,8 @@ import {
   type RenderClip,
   type RenderRequest,
   type RenderSettings,
+  type ShapeElement,
+  type ShapeKind,
   type TextMoment,
   type ZoomDirection,
 } from "@/types/editor";
@@ -124,6 +130,12 @@ interface PersistedSettings {
    */
   transcript: string;
   moments: TextMoment[];
+  /**
+   * Persisted alongside the moments, and for the same reason: a shape is pure
+   * numbers, so unlike an image or a plate it survives a reload intact. The
+   * PNG it renders through is made at export time and never stored.
+   */
+  shapes: ShapeElement[];
 }
 
 interface EditorStore extends PersistedSettings {
@@ -163,6 +175,13 @@ interface EditorStore extends PersistedSettings {
   detachBackdrop: (momentId: string) => void;
   removeMoment: (id: string) => void;
   clearMoments: () => void;
+
+  addShape: (kind: ShapeKind, start: number) => void;
+  updateShape: (id: string, patch: Partial<ShapeElement>) => void;
+  /** Drag: centre only, which is the hot path and worth its own action. */
+  moveShape: (id: string, x: number, y: number) => void;
+  removeShape: (id: string) => void;
+  clearShapes: () => void;
 
   startExport: () => Promise<void>;
   cancelExport: () => void;
@@ -210,6 +229,7 @@ export const useEditorStore = create<EditorStore>()(
       transcript: "",
       candidates: [],
       moments: [],
+      shapes: [],
       backdrops: [],
 
       settings: DEFAULT_SETTINGS,
@@ -393,7 +413,10 @@ export const useEditorStore = create<EditorStore>()(
           const moment: TextMoment = {
             id: candidate.id,
             text: candidate.text,
-            start: candidate.start,
+            // Ahead of the spoken word, never before the film starts — see
+            // MOMENT_LEAD_SECONDS. The candidate list still shows the time the
+            // phrase is said, which is the time worth reading it against.
+            start: Math.max(0, candidate.start - MOMENT_LEAD_SECONDS),
             // Whatever the last one was set to. Someone who dialled in a style,
             // a size and a darkening wants the next one to match, and having to
             // set all four again for every moment in a script is the tedious
@@ -405,6 +428,62 @@ export const useEditorStore = create<EditorStore>()(
             export: invalidate(state),
           };
         }),
+
+      addShape: (kind, start) =>
+        set((state) => {
+          if (state.shapes.length >= MAX_SHAPES) return state;
+          const previous = state.shapes[state.shapes.length - 1];
+          const shape: ShapeElement = {
+            id: `sh-${Date.now().toString(36)}-${state.shapes.length}`,
+            kind,
+            // The last shape's look and timing, the same courtesy a new text
+            // moment gets: a run of arrows marking the same kind of thing wants
+            // to match, and setting six fields again for each is the tedium.
+            ...SHAPE_DEFAULTS,
+            ...(previous
+              ? {
+                  colour: previous.colour,
+                  opacity: previous.opacity,
+                  stroke: previous.stroke,
+                  duration: previous.duration,
+                  fadeIn: previous.fadeIn,
+                  fadeOut: previous.fadeOut,
+                  width: previous.width,
+                  height: previous.height,
+                }
+              : {}),
+            // An arrow at its default square is a stubby thing; wider reads as
+            // an arrow at a glance, which is the only reason to reach for one.
+            ...(kind === "arrow" && !previous ? { width: 0.22, height: 0.1 } : {}),
+            start: Math.max(0, start),
+          };
+          return { shapes: [...state.shapes, shape], export: invalidate(state) };
+        }),
+
+      updateShape: (id, patch) =>
+        set((state) => ({
+          shapes: state.shapes.map((shape) =>
+            shape.id === id ? { ...shape, ...patch } : shape
+          ),
+          export: invalidate(state),
+        })),
+
+      moveShape: (id, x, y) =>
+        set((state) => ({
+          shapes: state.shapes.map((shape) =>
+            shape.id === id ? { ...shape, x, y } : shape
+          ),
+          export: invalidate(state),
+        })),
+
+      removeShape: (id) =>
+        set((state) => ({
+          shapes: state.shapes.filter((shape) => shape.id !== id),
+          export: invalidate(state),
+        })),
+
+      clearShapes: () =>
+        set((state) => ({ shapes: [], export: invalidate(state) })),
 
       addBlankMoment: (start) =>
         set((state) => {
@@ -526,6 +605,26 @@ export const useEditorStore = create<EditorStore>()(
             uploads.push({ key: plate.id, kind: "image", file: plate.file });
           }
 
+          // Each shape becomes a frame-sized transparent PNG, painted here at
+          // the export's own resolution by the same canvas code that painted
+          // the preview. Rasterising now rather than when the shape was drawn
+          // is what keeps it sharp at 4K and correct after a resolution change:
+          // the plate can never be staler than the export it was made for.
+          const shapes = state.shapes
+            .slice(0, MAX_SHAPES)
+            .filter((shape) => shape.duration > 0 && shape.opacity > 0.001);
+          for (const shape of shapes) {
+            uploads.push({
+              key: `shape:${shape.id}`,
+              kind: "image",
+              file: await rasteriseShape(
+                shape,
+                state.settings.width,
+                state.settings.height
+              ),
+            });
+          }
+
           if (state.audio) {
             uploads.push({ key: "__audio", kind: "audio", file: state.audio.file });
           }
@@ -589,6 +688,12 @@ export const useEditorStore = create<EditorStore>()(
                   ? stored.get(moment.backdropId)
                   : undefined,
               })),
+            // Same stamping as a backdrop: the id addresses the shape in the
+            // browser, the stored name is the only one the renderer knows.
+            shapes: shapes.map((shape) => ({
+              ...shape,
+              image: stored.get(`shape:${shape.id}`),
+            })),
           };
 
           const started = (await postJson(
@@ -665,6 +770,7 @@ export const useEditorStore = create<EditorStore>()(
         fileName: state.fileName,
         transcript: state.transcript,
         moments: state.moments,
+        shapes: state.shapes,
       }),
       /**
        * `settings` is one stored object, and the default merge replaces it
@@ -683,6 +789,17 @@ export const useEditorStore = create<EditorStore>()(
           moments: (saved.moments ?? []).map((moment) => ({
             ...MOMENT_DEFAULTS,
             ...moment,
+          })),
+          // Layered over the defaults for the same reason the moments are: a
+          // shape saved before a field existed comes back without it, and the
+          // canvas would then paint an undefined width.
+          shapes: (saved.shapes ?? []).map((shape) => ({
+            ...SHAPE_DEFAULTS,
+            ...shape,
+            // Never restored: it names a file in a job directory that a later
+            // session has no claim on, and a stale one would have the renderer
+            // reject the export by name.
+            image: undefined,
           })),
           transcript,
           // Derived from the transcript, so it is rebuilt rather than stored —

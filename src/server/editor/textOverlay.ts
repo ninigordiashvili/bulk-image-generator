@@ -26,13 +26,25 @@ const TRAVEL = 0.55;
  * A fade can be set to zero, and can also be longer than the moment it belongs
  * to. Both ends are clamped so the two halves never overlap and the text is
  * always fully up for at least an instant.
+ *
+ * Loose numbers rather than a moment, because the shape elements fade by the
+ * same rules and a second copy of this would be a second thing to keep in step.
  */
+export function rampOf(
+  fadeIn: number | undefined,
+  fadeOut: number | undefined,
+  duration: number
+): { in: number; out: number } {
+  const inSeconds = Math.max(0, fadeIn ?? 0.35);
+  const outSeconds = Math.max(0, fadeOut ?? 0.45);
+  const room = Math.max(0.02, duration - 0.02);
+  const scale =
+    inSeconds + outSeconds > room ? room / (inSeconds + outSeconds) : 1;
+  return { in: inSeconds * scale, out: outSeconds * scale };
+}
+
 function fadesOf(moment: TextMoment): { in: number; out: number } {
-  const fadeIn = Math.max(0, moment.fadeIn ?? 0.35);
-  const fadeOut = Math.max(0, moment.fadeOut ?? 0.45);
-  const room = Math.max(0.02, moment.duration - 0.02);
-  const scale = fadeIn + fadeOut > room ? room / (fadeIn + fadeOut) : 1;
-  return { in: fadeIn * scale, out: fadeOut * scale };
+  return rampOf(moment.fadeIn, moment.fadeOut, moment.duration);
 }
 
 /**

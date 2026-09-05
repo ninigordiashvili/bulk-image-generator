@@ -162,6 +162,13 @@ interface VideoStore {
   removeShot: (id: string) => void;
   clearShots: () => void;
   applyToAll: (settings: Partial<ShotSettings>) => void;
+  /**
+   * One prompt onto every row. Not part of `applyToAll` because that also
+   * writes what it applied into `defaults`, and a prompt is not a default: a
+   * row added later describes its own image, and inheriting the last batch's
+   * wording would be worse than an empty box.
+   */
+  applyPromptToAll: (prompt: string) => void;
   addAudioSource: (file: File) => Promise<AudioSource | null>;
   removeAudioSource: (id: string) => void;
   setShotAudio: (id: string, audio: ShotAudio | undefined) => void;
@@ -432,6 +439,19 @@ export const useVideoStore = create<VideoStore>()(
         set((state) => ({
           shots: state.shots.map((shot) => reconcileShot({ ...shot, ...settings })),
           defaults: { ...state.defaults, ...settings },
+        }));
+      },
+
+      applyPromptToAll: (prompt) => {
+        set((state) => ({
+          shots: state.shots.map((shot) =>
+            shot.prompt === prompt
+              ? shot
+              : // Same rule `updateShot` applies to a hand-edited prompt: the
+                // prompt *is* the render, so a task already in flight for this
+                // row would come back as the old clip and still be billed.
+                { ...shot, prompt, taskId: undefined }
+          ),
         }));
       },
 

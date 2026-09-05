@@ -33,6 +33,8 @@ export function VideoShotRow({
   const provider = useVideoStore((state) => state.provider);
   const updateShot = useVideoStore((state) => state.updateShot);
   const removeShot = useVideoStore((state) => state.removeShot);
+  const applyPromptToAll = useVideoStore((state) => state.applyPromptToAll);
+  const shotCount = useVideoStore((state) => state.shots.length);
   const retryJob = useVideoStore((state) => state.retryJob);
   const creditRates = useVideoStore((state) => state.creditRates);
   const audioSources = useVideoStore((state) => state.audioSources);
@@ -74,15 +76,33 @@ export function VideoShotRow({
               updateShot(shot.id, { prompt: event.target.value })
             }
           />
-          <button
-            type="button"
-            className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-muted transition hover:border-red-500 hover:text-red-400 disabled:opacity-40"
-            disabled={disabled}
-            onClick={() => removeShot(shot.id)}
-            title="Remove this shot"
-          >
-            ✕
-          </button>
+          <div className="flex shrink-0 flex-col gap-1">
+            <button
+              type="button"
+              className="rounded-md border border-line px-2 py-1 text-[11px] text-muted transition hover:border-red-500 hover:text-red-400 disabled:opacity-40"
+              disabled={disabled}
+              onClick={() => removeShot(shot.id)}
+              title="Remove this shot"
+            >
+              ✕
+            </button>
+            {/* Write the prompt once, push it everywhere — the same affordance
+                the voice tracks carry, and the tedious part of a ten-row batch
+                where every shot wants the same direction. */}
+            <button
+              type="button"
+              className="rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-muted transition hover:border-accent hover:text-accent disabled:opacity-40"
+              disabled={disabled || shotCount < 2 || !shot.prompt.trim()}
+              onClick={() => applyPromptToAll(shot.prompt)}
+              title={
+                shotCount < 2
+                  ? "Add another shot first"
+                  : `Give all ${shotCount} rows this prompt, replacing what they have`
+              }
+            >
+              → all
+            </button>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">

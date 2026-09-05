@@ -100,6 +100,8 @@ export interface RenderRequest {
   settings: RenderSettings;
   /** Text shown over the picture. Absent on an older client's request. */
   moments?: TextMoment[];
+  /** Drawn elements over the picture. Absent on an older client's request. */
+  shapes?: ShapeElement[];
 }
 
 export type JobPhase =
@@ -275,4 +277,88 @@ export const MOMENT_DEFAULTS = {
 /** The height a backdrop takes when it is first switched on. */
 export const BACKDROP_DEFAULT_HEIGHT = 510 / 1080;
 
+/**
+ * How far ahead of the spoken word a moment taken from the transcript starts.
+ *
+ * A transcript timestamp is when the phrase is *said*. Text that appears on
+ * that exact frame is already late: it has to fade in and travel before it is
+ * readable, so the viewer hears the words before they can see them. Half a
+ * second in front puts the text fully up roughly as the phrase lands.
+ *
+ * Only applied to moments read off a transcript. One placed by hand is placed
+ * where it was asked for, and one already on the timeline never moves — a lead
+ * that re-applied on every scan would walk the whole script backwards.
+ */
+export const MOMENT_LEAD_SECONDS = 0.5;
+
 export const MAX_MOMENTS = 60;
+
+/**
+ * A drawn element over the picture — a box, a circle, an arrow — placed
+ * anywhere in the frame.
+ *
+ * How this reaches the export is the whole design. ffmpeg can draw a rectangle
+ * (`drawbox`) and nothing else: there is no circle primitive, no arrow, and the
+ * one general escape hatch (`geq`) measured 139x slower than the baseline
+ * encode where the backdrop plates were being considered. So the browser draws
+ * the shape into a frame-sized transparent PNG and uploads it, and the renderer
+ * overlays that at 0,0.
+ *
+ * The point of a *frame-sized* plate rather than a cropped one is that no
+ * position, rotation or size is ever recomputed server-side. The canvas that
+ * draws the preview draws the export, so the two cannot disagree — which is the
+ * failure this whole feature was asked to fix.
+ */
+export type ShapeKind = "rect" | "circle" | "arrow";
+
+export const SHAPE_KINDS: ShapeKind[] = ["rect", "circle", "arrow"];
+
+export interface ShapeElement {
+  id: string;
+  kind: ShapeKind;
+  /** Centre, as fractions of the frame — the same convention a moment's x/y uses. */
+  x: number;
+  y: number;
+  /** Size as fractions of the frame, so it scales with the export. */
+  width: number;
+  height: number;
+  /** Degrees clockwise. What points an arrow at the thing it means. */
+  rotation: number;
+  /** `#rrggbb`. */
+  colour: string;
+  opacity: number;
+  /**
+   * Outline thickness as a fraction of frame height. 0 fills the shape solid,
+   * which is what a highlight box usually wants and an outline box never does.
+   */
+  stroke: number;
+  start: number;
+  duration: number;
+  fadeIn: number;
+  fadeOut: number;
+  /**
+   * The rasterised plate's name on the server, stamped on during upload. Only
+   * the renderer reads it; before an export there is nothing to read.
+   */
+  image?: string;
+}
+
+export const SHAPE_DEFAULTS = {
+  x: 0.5,
+  y: 0.5,
+  width: 0.18,
+  height: 0.18,
+  rotation: 0,
+  colour: "#ffcc33",
+  opacity: 1,
+  stroke: 0,
+  duration: 4,
+  fadeIn: 0.35,
+  fadeOut: 0.45,
+};
+
+/**
+ * Each shape is an extra decoded input on every segment it touches, so this is
+ * a real ceiling rather than a tidiness one.
+ */
+export const MAX_SHAPES = 24;

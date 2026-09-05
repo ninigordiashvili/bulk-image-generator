@@ -4,10 +4,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatTime } from "@/lib/editor/format";
 import { applyLook } from "@/lib/editor/filmPreview";
 import { BitmapCache } from "@/lib/editor/media";
-import { drawMoments, momentsAt, restOf } from "@/lib/editor/momentPreview";
+import {
+  drawMomentPlates,
+  drawMomentText,
+  momentsAt,
+  restOf,
+} from "@/lib/editor/momentPreview";
+import { drawShapes, shapeUnder } from "@/lib/editor/shapes";
 import { clipAt, clipZoom, type Timeline } from "@/lib/editor/timeline";
 import type { AudioTrack, EditorImage } from "@/store/editorStore";
-import type { FilmLook, TextMoment, ZoomDirection } from "@/types/editor";
+import type {
+  FilmLook,
+  ShapeElement,
+  TextMoment,
+  ZoomDirection,
+} from "@/types/editor";
 import { Filmstrip } from "./Filmstrip";
 
 /** The canvas the preview draws into. Fixed, and independent of export size —
@@ -27,11 +38,14 @@ interface Props {
   zoomAmountMotion: number;
   film: FilmLook;
   moments: TextMoment[];
+  shapes: ShapeElement[];
   maxStretch: number;
   thumbnails: Map<string, string>;
   onToggleImage: (id: string) => void;
   /** Drag-to-position. Fractions of the frame, addressing the text's centre. */
   onMoveMoment: (id: string, x: number, y: number) => void;
+  /** The same for a shape element, addressing its centre. */
+  onMoveShape: (id: string, x: number, y: number) => void;
   /** Attached plates, by id, so the preview composites what the export will. */
   backdrops: { id: string; url: string }[];
 }
@@ -45,10 +59,12 @@ export function PreviewStage({
   zoomAmountMotion,
   film,
   moments,
+  shapes,
   maxStretch,
   thumbnails,
   onToggleImage,
   onMoveMoment,
+  onMoveShape,
   backdrops,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -81,6 +97,12 @@ export function PreviewStage({
   useEffect(() => {
     momentsRef.current = moments;
   }, [moments]);
+
+  /** Same treatment, same reasons — see the note on `momentsRef`. */
+  const shapesRef = useRef(shapes);
+  useEffect(() => {
+    shapesRef.current = shapes;
+  }, [shapes]);
 
   // The clock lives in refs: it advances sixty times a second, and putting it
   // in state would re-render the whole editor at that rate.
@@ -144,7 +166,12 @@ export function PreviewStage({
    * offset the text jumps so its middle lands under the cursor on mousedown,
    * which reads as the drag having already moved it.
    */
-  const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
+  const dragRef = useRef<{
+    kind: "moment" | "shape";
+    id: string;
+    dx: number;
+    dy: number;
+  } | null>(null);
   /** Set once the pointer actually moves, so a plain click still toggles play. */
   const draggedRef = useRef(false);
 
@@ -212,16 +239,40 @@ export function PreviewStage({
 
   const onPointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
-      const showing = momentsAt(momentsRef.current, currentTime()).filter((moment) =>
+      const time = currentTime();
+      const point = pointFrom(event);
+
+      // A shape is only grabbed when the pointer is actually inside it, so
+      // clicking the empty half of the frame still reaches the text. Text has
+      // no hit test of its own — it is grabbed from anywhere — so testing the
+      // shapes first is what makes both reachable.
+      const shape = shapeUnder(shapesRef.current, time, point.x, point.y);
+      if (shape) {
+        dragRef.current = {
+          kind: "shape",
+          id: shape.id,
+          dx: shape.x - point.x,
+          dy: shape.y - point.y,
+        };
+        draggedRef.current = false;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        return;
+      }
+
+      const showing = momentsAt(momentsRef.current, time).filter((moment) =>
         moment.text.trim()
       );
       if (showing.length === 0) return;
 
       // Last wins: it is the one drawn on top, so it is the one being pointed at.
       const moment = showing[showing.length - 1];
-      const point = pointFrom(event);
       const rest = restOf(moment);
-      dragRef.current = { id: moment.id, dx: rest.x - point.x, dy: rest.y - point.y };
+      dragRef.current = {
+        kind: "moment",
+        id: moment.id,
+        dx: rest.x - point.x,
+        dy: rest.y - point.y,
+      };
       draggedRef.current = false;
       event.currentTarget.setPointerCapture(event.pointerId);
     },
@@ -234,11 +285,14 @@ export function PreviewStage({
       if (!drag) return;
       draggedRef.current = true;
       const point = pointFrom(event);
-      // Clamped so text cannot be parked outside the frame and lost.
+      // Clamped so nothing can be parked outside the frame and lost.
       const clamp = (value: number) => Math.max(0, Math.min(1, value));
-      onMoveMoment(drag.id, clamp(point.x + drag.dx), clamp(point.y + drag.dy));
+      const x = clamp(point.x + drag.dx);
+      const y = clamp(point.y + drag.dy);
+      if (drag.kind === "shape") onMoveShape(drag.id, x, y);
+      else onMoveMoment(drag.id, x, y);
     },
-    [onMoveMoment, pointFrom]
+    [onMoveMoment, onMoveShape, pointFrom]
   );
 
   const onPointerUp = useCallback((event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -400,13 +454,25 @@ export function PreviewStage({
         applyLook(context, clip && clip.kind !== "avatar" ? film : "off", time, paint);
         // Text goes on above the look, as it does in the render: grain belongs
         // to the picture, and a caption is not part of the picture.
-        drawMoments(
+        // Bottom to top, in the order the export composites: the plates a
+        // moment attaches, the shape elements, then the dim and the words over
+        // the lot. Painting these in any other order would be a preview that
+        // lies about the export — see lib/editor/momentPreview.ts.
+        drawMomentPlates(
           context,
           momentsRef.current,
           time,
           PREVIEW_WIDTH,
           PREVIEW_HEIGHT,
           plateRef.current
+        );
+        drawShapes(context, shapesRef.current, time, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+        drawMomentText(
+          context,
+          momentsRef.current,
+          time,
+          PREVIEW_WIDTH,
+          PREVIEW_HEIGHT
         );
       }
 

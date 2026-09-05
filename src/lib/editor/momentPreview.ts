@@ -11,13 +11,28 @@ import type { TextMoment } from "@/types/editor";
  */
 const TRAVEL = 0.55;
 
-/** Mirrors fadesOf in server/editor/textOverlay.ts; see the note there. */
+/**
+ * Mirrors `rampOf` in server/editor/textOverlay.ts; see the note there.
+ *
+ * Taken as loose numbers rather than a moment so the shape elements can share
+ * it — they fade by the same rules, and two copies of this arithmetic is two
+ * things to keep in step.
+ */
+export function rampOf(
+  fadeIn: number | undefined,
+  fadeOut: number | undefined,
+  duration: number
+): { in: number; out: number } {
+  const inSeconds = Math.max(0, fadeIn ?? 0.35);
+  const outSeconds = Math.max(0, fadeOut ?? 0.45);
+  const room = Math.max(0.02, duration - 0.02);
+  const scale =
+    inSeconds + outSeconds > room ? room / (inSeconds + outSeconds) : 1;
+  return { in: inSeconds * scale, out: outSeconds * scale };
+}
+
 function fadesOf(moment: TextMoment): { in: number; out: number } {
-  const fadeIn = Math.max(0, moment.fadeIn ?? 0.35);
-  const fadeOut = Math.max(0, moment.fadeOut ?? 0.45);
-  const room = Math.max(0.02, moment.duration - 0.02);
-  const scale = fadeIn + fadeOut > room ? room / (fadeIn + fadeOut) : 1;
-  return { in: fadeIn * scale, out: fadeOut * scale };
+  return rampOf(moment.fadeIn, moment.fadeOut, moment.duration);
 }
 
 const smoothstep = (p: number) => p * p * (3 - 2 * p);
@@ -51,11 +66,27 @@ export function momentsAt(moments: TextMoment[], time: number): TextMoment[] {
   );
 }
 
+/** How far up a moment's fade is at `time`, 0 when it isn't showing at all. */
+function fadeAt(moment: TextMoment, time: number): number {
+  const end = moment.start + moment.duration;
+  const ramp = fadesOf(moment);
+  return clamp01(
+    Math.min(
+      (time - moment.start) / Math.max(ramp.in, 0.001),
+      (end - time) / Math.max(ramp.out, 0.001)
+    )
+  );
+}
+
 /**
- * Draws whatever is on screen at `time` over an already-painted frame.
- * Does nothing when no moment is showing, which is almost always.
+ * The backdrop plates, and only those.
+ *
+ * Split from the text because the export composites in a definite order —
+ * picture, plates, shape elements, then the dim and the text on top of the lot
+ * — and the preview has to paint in that same order to be worth believing.
+ * Drawn as one pass over every showing moment for the same reason.
  */
-export function drawMoments(
+export function drawMomentPlates(
   context: CanvasRenderingContext2D,
   moments: TextMoment[],
   time: number,
@@ -66,14 +97,47 @@ export function drawMoments(
 ): void {
   for (const moment of momentsAt(moments, time)) {
     if (!moment.text.trim()) continue;
-    const end = moment.start + moment.duration;
-    const ramp = fadesOf(moment);
-    const fade = clamp01(
-      Math.min(
-        (time - moment.start) / Math.max(ramp.in, 0.001),
-        (end - time) / Math.max(ramp.out, 0.001)
-      )
-    );
+    const fade = fadeAt(moment, time);
+    if (fade <= 0) continue;
+
+    const plate = moment.backdropId ? backdrops?.get(moment.backdropId) : undefined;
+    if (!plate) continue;
+
+    context.save();
+    // Full width, sat against the bottom edge — matching `overlay=y=H-h`. The
+    // height either follows the setting or the plate's own aspect, the same
+    // choice the export makes with `scale=W:h or -2`.
+    const natural =
+      "naturalHeight" in plate
+        ? { w: plate.naturalWidth, h: plate.naturalHeight }
+        : { w: width, h: height };
+    const band = moment.backdropHeight;
+    const drawnHeight =
+      band && band > 0.001
+        ? height * Math.min(1, band)
+        : (width * natural.h) / Math.max(1, natural.w);
+    context.globalAlpha = fade * Math.max(0, Math.min(1, moment.backdropOpacity ?? 1));
+    context.drawImage(plate, 0, height - drawnHeight, width, drawnHeight);
+    context.restore();
+  }
+}
+
+/**
+ * The dim and the words, over whatever the plates and shapes have already put
+ * down. This is the export's `overlayChain`, which is likewise applied after
+ * every overlay — the dim darkens the plate rather than the plate covering the
+ * dim.
+ */
+export function drawMomentText(
+  context: CanvasRenderingContext2D,
+  moments: TextMoment[],
+  time: number,
+  width: number,
+  height: number
+): void {
+  for (const moment of momentsAt(moments, time)) {
+    if (!moment.text.trim()) continue;
+    const fade = fadeAt(moment, time);
     if (fade <= 0) continue;
 
     context.save();
@@ -83,27 +147,6 @@ export function drawMoments(
       context.globalAlpha = darken * fade;
       context.fillStyle = "#000000";
       context.fillRect(0, 0, width, height);
-    }
-
-    // The attached plate. Drawn after the flat dim and before the text, which
-    // is the order the export composites them — see server/editor/textOverlay.ts,
-    // where the same three go base, overlay, drawtext.
-    const plate = moment.backdropId ? backdrops?.get(moment.backdropId) : undefined;
-    if (plate) {
-      // Full width, sat against the bottom edge — matching `overlay=y=H-h`. The
-      // height either follows the setting or the plate's own aspect, the same
-      // choice the export makes with `scale=W:h or -2`.
-      const natural =
-        "naturalHeight" in plate
-          ? { w: plate.naturalWidth, h: plate.naturalHeight }
-          : { w: width, h: height };
-      const band = moment.backdropHeight;
-      const drawnHeight =
-        band && band > 0.001
-          ? height * Math.min(1, band)
-          : (width * natural.h) / Math.max(1, natural.w);
-      context.globalAlpha = fade * Math.max(0, Math.min(1, moment.backdropOpacity ?? 1));
-      context.drawImage(plate, 0, height - drawnHeight, width, drawnHeight);
     }
 
     const look = styleOf(moment.style);

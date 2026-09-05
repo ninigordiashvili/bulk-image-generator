@@ -5,8 +5,11 @@ import {
   FPS_CHOICES,
   MAX_IMAGES,
   MAX_MOMENTS,
+  MAX_SHAPES,
   MOMENT_ANIMATIONS,
   MOMENT_DEFAULTS,
+  SHAPE_DEFAULTS,
+  SHAPE_KINDS,
   type FilmLook,
   type ErrorResponse,
   type JobStatus,
@@ -14,6 +17,8 @@ import {
   type RenderRequest,
   type RenderSettings,
   type MomentAnimation,
+  type ShapeElement,
+  type ShapeKind,
   type TextMoment,
 } from "@/types/editor";
 import { STYLE_ORDER, type MomentStyle } from "@/lib/editor/textStyles";
@@ -26,6 +31,17 @@ function fail(error: string, status = 400) {
 
 const clamp = (value: number, low: number, high: number) =>
   Math.min(high, Math.max(low, value));
+
+/**
+ * A 0-to-1 field that is allowed to be absent, and means something different
+ * when it is: a missing `x` centres the text, a missing `backdropHeight` lets
+ * the plate keep its own aspect. So a non-number stays `undefined` rather than
+ * being coerced to 0, which every one of those fields would read as a value.
+ */
+const fraction = (value: unknown): number | undefined => {
+  const n = Number(value);
+  return Number.isFinite(n) ? clamp(n, 0, 1) : undefined;
+};
 
 /**
  * Starts the render and returns immediately. A ten-minute export takes over a
@@ -140,8 +156,59 @@ function validate(
       total,
       settings,
       moments: validateMoments(body.moments),
+      shapes: validateShapes(body.shapes),
     },
   };
+}
+
+/**
+ * The shape elements, rebuilt field by field like everything else in here.
+ *
+ * A shape with no `image` is dropped rather than defaulted: the plate is the
+ * shape — there is nothing to draw without it — so one that arrives unreferenced
+ * means an upload did not happen, and silently rendering nothing at all is the
+ * failure this function exists to avoid repeating.
+ */
+function validateShapes(raw: unknown): ShapeElement[] {
+  if (!Array.isArray(raw)) return [];
+  const shapes: ShapeElement[] = [];
+
+  for (const entry of raw.slice(0, MAX_SHAPES)) {
+    const image = entry?.image ? String(entry.image) : "";
+    if (!image) continue;
+    const start = Number(entry?.start);
+    const duration = Number(entry?.duration);
+    if (!Number.isFinite(start) || start < 0) continue;
+    if (!Number.isFinite(duration) || duration <= 0) continue;
+
+    shapes.push({
+      id: String(entry?.id ?? `s${shapes.length}`),
+      kind: SHAPE_KINDS.includes(entry?.kind as ShapeKind)
+        ? (entry.kind as ShapeKind)
+        : "rect",
+      image,
+      start,
+      duration: clamp(duration, 0.2, 600),
+      // Geometry is carried for completeness and for anything that reads a
+      // request back; the renderer does not consult it. The plate was painted
+      // at the export's own size with all of this already applied — see
+      // server/editor/shapeOverlay.ts.
+      x: fraction(entry?.x) ?? SHAPE_DEFAULTS.x,
+      y: fraction(entry?.y) ?? SHAPE_DEFAULTS.y,
+      width: fraction(entry?.width) ?? SHAPE_DEFAULTS.width,
+      height: fraction(entry?.height) ?? SHAPE_DEFAULTS.height,
+      rotation: Number.isFinite(Number(entry?.rotation)) ? Number(entry.rotation) : 0,
+      colour: /^#[0-9a-f]{6}$/i.test(String(entry?.colour ?? ""))
+        ? String(entry.colour)
+        : SHAPE_DEFAULTS.colour,
+      opacity: fraction(entry?.opacity) ?? 1,
+      stroke: fraction(entry?.stroke) ?? 0,
+      fadeIn: clamp(Number(entry?.fadeIn ?? SHAPE_DEFAULTS.fadeIn), 0, 5),
+      fadeOut: clamp(Number(entry?.fadeOut ?? SHAPE_DEFAULTS.fadeOut), 0, 5),
+    });
+  }
+
+  return shapes.sort((a, b) => a.start - b.start);
 }
 
 /**
@@ -179,6 +246,16 @@ function validateMoments(raw: unknown): TextMoment[] {
       size: clamp(Number(entry?.size) || MOMENT_DEFAULTS.size, 0.02, 0.5),
       fadeIn: clamp(Number(entry?.fadeIn ?? MOMENT_DEFAULTS.fadeIn), 0, 5),
       fadeOut: clamp(Number(entry?.fadeOut ?? MOMENT_DEFAULTS.fadeOut), 0, 5),
+      // Left out once already, which is what made dragging and the backdrop
+      // plate preview-only features: the renderer reads them, but they never
+      // survived this function to reach it. `undefined` rather than a default,
+      // because absent means "centred" and "no plate" downstream — writing 0.5
+      // in here would be the same answer, but writing 0 for a height would not.
+      x: fraction(entry?.x),
+      y: fraction(entry?.y),
+      backdropImage: entry?.backdropImage ? String(entry.backdropImage) : undefined,
+      backdropHeight: fraction(entry?.backdropHeight),
+      backdropOpacity: fraction(entry?.backdropOpacity),
     });
   }
 
