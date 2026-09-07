@@ -1,7 +1,7 @@
 import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { getJob } from "@/server/editor/jobs";
+import { JOB_ID, jobRoot } from "@/server/editor/jobs";
 
 /**
  * Hands back the joined narration bed, in either format it was written in.
@@ -20,15 +20,34 @@ export async function GET(
   context: RouteContext<"/api/editor/job/[id]/voiceover/download">
 ) {
   const { id } = await context.params;
-  const job = getJob(id);
-  if (!job) return new Response("No such editing session.", { status: 404 });
+  // The id is checked rather than looked up. Reading a finished file back is a
+  // question about the disk, not about whether the server still remembers the
+  // session: the join can outlive the registry entry, because the dev server
+  // drops its in-memory state whenever it reloads the server modules — and a
+  // long join writing tens of megabytes is itself enough to provoke that when
+  // the scratch directory sits inside the dev root, which on Windows it does.
+  // Losing the map that way used to strand audio that was sitting right there.
+  // Sixteen hex characters can't escape the root, so this is the same guard
+  // resolveInside applies, in the one shape this route needs.
+  if (!JOB_ID.test(id)) return new Response("No such editing session.", { status: 404 });
 
   const asked = new URL(request.url).searchParams.get("format");
   const format = asked === "mp3" ? FORMATS.mp3 : FORMATS.m4a;
 
-  const file = path.join(job.dir, format.file);
+  const dir = path.join(jobRoot(), id);
+  const file = path.join(dir, format.file);
   const stat = await fs.stat(file).catch(() => null);
-  if (!stat) return new Response("Nothing has been joined for this session.", { status: 404 });
+  if (!stat) {
+    // Which of the two it is matters to whoever is reading the message: a
+    // swept session is gone for good, an unjoined one only needs the button.
+    const session = await fs.stat(dir).catch(() => null);
+    return new Response(
+      session
+        ? "Nothing has been joined for this session."
+        : "That editing session is no longer on disk — join the takes again.",
+      { status: 404 }
+    );
+  }
 
   return new Response(Readable.toWeb(createReadStream(file)) as ReadableStream, {
     headers: {

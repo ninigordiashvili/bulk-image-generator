@@ -32,13 +32,15 @@ export async function DELETE(
 ) {
   const { id } = await context.params;
   const job = getJob(id);
-  if (!job) return NextResponse.json({ ok: true });
 
   if (new URL(request.url).searchParams.get("keep") === "1") {
+    if (!job) return NextResponse.json({ ok: true });
     cancelJob(job);
     return NextResponse.json({ ok: true, status: snapshot(job) });
   }
 
+  // Without a job to cancel there is still a directory to remove: the registry
+  // is memory and the uploads are disk, and the two outlive each other.
   await discardJob(id);
   return NextResponse.json({ ok: true });
 }

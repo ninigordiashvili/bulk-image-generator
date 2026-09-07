@@ -197,7 +197,17 @@ function revoke(url: string | null) {
 
 async function grab(url: string) {
   const response = await fetch(url);
-  if (!response.ok) throw new Error("The joined track could not be read back.");
+  if (!response.ok) {
+    // The server says which way this went — the session was swept, or it was
+    // there with nothing joined in it. One message covering both said neither,
+    // and this is the only place the answer is known.
+    const said = (await response.text().catch(() => "")).trim();
+    throw new Error(
+      said && said.length <= 200 && !said.startsWith("<")
+        ? said
+        : `The joined track could not be read back (${response.status}).`
+    );
+  }
   return response.blob();
 }
 

@@ -128,11 +128,18 @@ export function cancelJob(job: Job): void {
 }
 
 export async function discardJob(id: string): Promise<void> {
+  if (!JOB_ID.test(id)) return;
   const job = getJob(id);
-  if (!job) return;
-  cancelJob(job);
-  registry.delete(id);
-  await fs.rm(job.dir, { recursive: true, force: true }).catch(() => {});
+  if (job) {
+    cancelJob(job);
+    registry.delete(id);
+  }
+  // Removed by id rather than through the job, because the two can come apart:
+  // a server reload empties the registry and leaves the directory, and the tab
+  // that made it is the only thing that will ever ask for it to go. Skipping
+  // the removal there left hundreds of megabytes of scratch behind until the
+  // six-hour sweep noticed.
+  await fs.rm(path.join(ROOT, id), { recursive: true, force: true }).catch(() => {});
 }
 
 /**
