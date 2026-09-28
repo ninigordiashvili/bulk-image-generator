@@ -1,3 +1,4 @@
+import { textPhases } from "./textAnimation";
 import { displayText, styleOf } from "./textStyles";
 import type { TextMoment } from "@/types/editor";
 
@@ -49,6 +50,7 @@ const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
  * at the centre, so nothing moves for a moment that was never dragged.
  */
 function travelOffset(animation: TextMoment["animation"]): number | null {
+  if (animation === "gentle") return 0.035;
   if (animation === "rise") return 0.2;
   if (animation === "drop") return -0.2;
   return null;
@@ -150,56 +152,59 @@ export function drawMomentText(
     }
 
     const look = styleOf(moment.style);
-    const words = displayText(moment.text, moment.style);
-    const size = Math.max(8, height * moment.size);
-    context.globalAlpha = fade;
-    context.font = `${look.weight} ${size}px ${look.css}`;
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-
-    const rest = restOf(moment);
-    const restX = width * rest.x;
-    const restY = height * rest.y;
-    const offset = travelOffset(moment.animation);
-    const y =
-      offset === null
-        ? restY
-        : restY +
-          height * offset * (1 - smoothstep(clamp01((time - moment.start) / TRAVEL)));
-
-    // The bar first, sized to the words, so the rest lands on top of it.
-    if (look.box) {
-      const pad = size * 0.35;
-      const measured = context.measureText(words).width;
-      context.fillStyle = `rgba(0,0,0,${look.boxAlpha})`;
-      context.fillRect(
-        restX - measured / 2 - pad,
-        y - size / 2 - pad,
-        measured + pad * 2,
-        size + pad * 2
-      );
-    }
-
-    // Shadow, then rim, then fill — the order drawtext composites them.
-    if (look.shadow > 0) {
-      context.shadowColor = `rgba(0,0,0,${look.shadowAlpha})`;
-      context.shadowOffsetY = Math.max(1, height * look.shadow);
-      context.shadowBlur = size * 0.06;
-    }
-    if (look.rim > 0) {
-      // Canvas strokes centred on the path, so half the width lands inside the
-      // glyph; doubling matches drawtext's outward-only border.
-      context.lineWidth = Math.max(1, height * look.rim) * 2;
-      context.strokeStyle = `rgba(0,0,0,${look.rimAlpha})`;
-      context.lineJoin = "round";
-      context.strokeText(words, restX, y);
-    }
-    context.shadowColor = "transparent";
-    context.shadowOffsetY = 0;
-    context.shadowBlur = 0;
-    context.fillStyle = `#${look.colour}`;
-    context.fillText(words, restX, y);
-
+    const phases = textPhases(moment).filter(phase => time - moment.start >= phase.from && time - moment.start < phase.to);
+    for (const phase of phases) {
+      const words = displayText(phase.text, moment.style);
+      const size = Math.max(8, height * moment.size);
+      context.globalAlpha = fade;
+      context.font = `${look.weight} ${size}px ${look.css}`;
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+  
+      const rest = restOf(moment);
+      const restX = width * rest.x + phase.offset * size;
+      const restY = height * rest.y;
+      const offset = travelOffset(moment.animation);
+      const y =
+        offset === null
+          ? restY
+          : restY +
+            height * offset * (1 - smoothstep(clamp01((time - moment.start) / TRAVEL)));
+  
+      // The bar first, sized to the words, so the rest lands on top of it.
+      if (look.box) {
+        const pad = size * 0.35;
+        const measured = context.measureText(words).width;
+        context.fillStyle = `rgba(0,0,0,${look.boxAlpha})`;
+        context.fillRect(
+          restX - measured / 2 - pad,
+          y - size / 2 - pad,
+          measured + pad * 2,
+          size + pad * 2
+        );
+      }
+  
+      // Shadow, then rim, then fill — the order drawtext composites them.
+      if (look.shadow > 0) {
+        context.shadowColor = `rgba(0,0,0,${look.shadowAlpha})`;
+        context.shadowOffsetY = Math.max(1, height * look.shadow);
+        context.shadowBlur = size * 0.06;
+      }
+      if (look.rim > 0) {
+        // Canvas strokes centred on the path, so half the width lands inside the
+        // glyph; doubling matches drawtext's outward-only border.
+        context.lineWidth = Math.max(1, height * look.rim) * 2;
+        context.strokeStyle = `rgba(0,0,0,${look.rimAlpha})`;
+        context.lineJoin = "round";
+        context.strokeText(words, restX, y);
+      }
+      context.shadowColor = "transparent";
+      context.shadowOffsetY = 0;
+      context.shadowBlur = 0;
+      context.fillStyle = `#${look.colour}`;
+      context.fillText(words, restX, y);
+  
+      }
     context.restore();
   }
 }

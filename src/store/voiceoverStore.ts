@@ -24,6 +24,10 @@ export interface VoiceoverState {
   url: string | null;
   urlMp3: string | null;
   /** A pause longer than this is too long. */
+  evenVolume: boolean;
+  shortenPauses: boolean;
+  setShortenPauses: (enabled: boolean) => void;
+  setEvenVolume: (enabled: boolean) => void;
   maxGap: number;
   /** What a too-long pause becomes. */
   keepGap: number;
@@ -60,6 +64,10 @@ export const useVoiceoverStore = create<VoiceoverState>()(
       // against the real detector on a 2.26s gap, that takes the leftover from
       // 1.22s to 1.02s. A browser holding the old 0.5 keeps it — the value is
       // persisted and still legal, so it has to be dragged down by hand.
+      evenVolume: false,
+      shortenPauses: true,
+      setShortenPauses: (enabled) => set((state) => ({ shortenPauses: enabled, ...cleared(state) })),
+      setEvenVolume: (enabled) => set((state) => ({ evenVolume: enabled, ...cleared(state) })),
       maxGap: 0.7,
       keepGap: 0.3,
       // Enough of the run-up that the first consonant of the next word is
@@ -106,7 +114,7 @@ export const useVoiceoverStore = create<VoiceoverState>()(
         })),
 
       join: async () => {
-        const { files, busy, maxGap, keepGap, leadIn } = get();
+        const { files, busy, maxGap, keepGap, leadIn, evenVolume, shortenPauses } = get();
         if (files.length === 0 || busy) return;
         set({ busy: true, error: null });
 
@@ -127,6 +135,8 @@ export const useVoiceoverStore = create<VoiceoverState>()(
 
           const joined = (await post(`/api/editor/job/${jobId}/voiceover`, {
             files: stored,
+            evenVolume,
+            shortenPauses,
             maxGap,
             keepGap,
             leadIn,
@@ -169,6 +179,8 @@ export const useVoiceoverStore = create<VoiceoverState>()(
       storage: createJSONStorage(() => localStorage),
       // Files and object URLs mean nothing after a reload; the two numbers do.
       partialize: (state) => ({
+        evenVolume: state.evenVolume,
+        shortenPauses: state.shortenPauses,
         maxGap: state.maxGap,
         keepGap: state.keepGap,
         leadIn: state.leadIn,
@@ -178,7 +190,7 @@ export const useVoiceoverStore = create<VoiceoverState>()(
         // Settings saved before the guard existed can be below its floors, and
         // a slider showing 0.1s when nothing under 0.5s is possible reads as a
         // broken setting rather than a raised floor.
-        return { ...saved, ...clampPacing(saved) };
+        return { ...saved, evenVolume: saved.evenVolume === true, shortenPauses: saved.shortenPauses !== false, ...clampPacing(saved) };
       },
     }
   )

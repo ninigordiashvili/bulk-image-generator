@@ -1,0 +1,102 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const Module = require('node:module');
+const ts = require('typescript');
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'activity-delete-check-'));
+process.env.WORK_ROOT = path.join(scratch, 'work');
+process.env.EDITOR_WORK_ROOT = path.join(scratch, 'editor');
+process.env.EDITOR_CACHE_DIR = path.join(scratch, 'cache');
+process.env.DOWNLOAD_RECEIPTS_ROOT = path.join(scratch, 'receipts');
+const root = path.resolve(__dirname, '..');
+const resolve = Module._resolveFilename;
+Module._resolveFilename = function(name, ...args) { return resolve.call(this, name.startsWith('@/') ? path.join(root, 'src', name.slice(2)) : name, ...args); };
+require.extensions['.ts'] = (module, file) => module._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText, file);
+const load = Module._load;
+Module._load = function(name, ...args) { if (name === './workProvider') return { performWork: async () => { throw Error('No generation allowed'); } }; return load.call(this, name, ...args); };
+
+async function main() {
+ const { recordDownload, readDownloads } = require('../src/server/downloadReceipts.ts');
+ const { cleanupSavedFiles } = require('../src/server/retention.ts');
+ const { RETENTION_MS } = require('../src/lib/retention.ts');
+ const work = require('../src/server/work.ts');
+ const jobs = require('../src/server/editor/jobs.ts');
+ const { serveFile } = require('../src/server/serveFile.ts');
+ const now = Date.now();
+ const id = '12345678-1234-1234-1234-123456789abc';
+ await work.createWork({id, kind:'image', accountId:'test', total:1, concurrency:1});
+ const live = global.__backgroundWork.records.get(id);
+ live.data.phase = 'done';
+ live.data.jobs = [{id:'job',status:'success',finishedAt:now,files:[{name:'a'},{name:'b'}]}];
+ const pending = await jobs.createJob(); pending.startedAt = now; pending.status.phase = 'done';
+ const saved = await jobs.createJob(); saved.startedAt = now; saved.status.phase = 'done';
+ const orphan = await jobs.createJob(); orphan.status.phase = 'done';
+ fs.writeFileSync(path.join(saved.dir,'output.mp4'), Buffer.alloc(2 * 1024 * 1024));
+ await recordDownload(saved.dir,'output');
+ const first = (await readDownloads(saved.dir)).output;
+ await recordDownload(saved.dir,'output');
+ assert.equal((await readDownloads(saved.dir)).output,first,'repeat downloads do not extend retention');
+ await recordDownload(orphan.dir,'output'); global.__editorJobs.delete(orphan.id);
+ await work.recordWorkDownload(id,0,0);
+ await cleanupSavedFiles(now + RETENTION_MS - 1);
+ assert.ok(fs.existsSync(saved.dir),'before 48h retained');
+ const later = Date.now() + RETENTION_MS + 1000;
+ const active = await jobs.createJob(); active.startedAt = now; active.status.phase = 'rendering'; active.controller = new AbortController();
+ await cleanupSavedFiles(later);
+ assert.ok(fs.existsSync(saved.dir),'active export defers deletion');
+ assert.equal(active.controller.signal.aborted,false);
+ active.status.phase = 'done'; active.controller = null;
+ await cleanupSavedFiles(later);
+ assert.ok(!fs.existsSync(saved.dir),'downloaded export deleted after 48h');
+ assert.ok(!fs.existsSync(orphan.dir),'receipt survives editor registry restart');
+ assert.ok(fs.existsSync(pending.dir),'undownloaded export retained');
+ assert.ok(fs.existsSync(work.workDir(id)),'partially downloaded batch retained');
+ await work.recordWorkDownload(id,0,1);
+ live.controller = new AbortController();
+ await assert.rejects(cleanupSavedFiles(Date.now()+RETENTION_MS+1000), /still active/);
+ assert.equal(live.controller.signal.aborted,false);
+ live.controller = undefined;
+ await cleanupSavedFiles(Date.now()+RETENTION_MS+1000);
+ assert.ok(!fs.existsSync(work.workDir(id)),'all downloaded results expire');
+ assert.ok((await readDownloads(work.workDir(id)))['0:0'],'small receipt survives payload deletion for other browsers');
+ const file=path.join(scratch,'download.bin');fs.writeFileSync(file,Buffer.alloc(2*1024*1024));
+ let count=0; const marked=async()=>{count++;};
+ let response=await serveFile(new Request('http://test/file'),file,'video/mp4','clip.mp4',marked);
+ await response.arrayBuffer();assert.equal(count,0,'preview is not download');
+ response=await serveFile(new Request('http://test/file?download=1',{headers:{range:'bytes=0-99'}}),file,'video/mp4','clip.mp4',marked);
+ await response.arrayBuffer();assert.equal(count,0,'partial range is not download');
+ response=await serveFile(new Request('http://test/file?download=1'),file,'video/mp4','clip.mp4',marked);
+ await response.body.cancel();await new Promise(resolve=>setTimeout(resolve,30));assert.equal(count,0,'aborted transfer is not download');
+ response=await serveFile(new Request('http://test/file?download=1'),file,'video/mp4','clip.mp4',marked);
+ await response.arrayBuffer();assert.equal(count,1,'full download recorded');
+ const { SegmentCache }=require('../src/server/editor/segmentCache.ts');const cache=new SegmentCache();await cache.prepare();
+
+ const stale=path.join(cache.dir,'a'.repeat(64)+'.ts'),fresh=path.join(cache.dir,'b'.repeat(64)+'.ts');
+ fs.writeFileSync(stale,'old');fs.writeFileSync(fresh,'untracked');
+ const ownerA=path.join(scratch,'ownerA'),ownerB=path.join(scratch,'ownerB');
+ const realNow=Date.now;
+ try {
+  Date.now=()=>now-RETENTION_MS-5000;
+  await recordDownload(path.join(cache.dir,'a'.repeat(64)),ownerA);
+  await recordDownload(path.join(cache.dir,'a'.repeat(64)),ownerB);
+  Date.now=()=>now-RETENTION_MS-1000;
+  await recordDownload(ownerA,'output');
+ } finally { Date.now=realNow; }
+ await cache.prune();assert.ok(fs.existsSync(stale),'shared cache retained for undownloaded owner');
+ try { Date.now=()=>now-RETENTION_MS-1000;await recordDownload(ownerB,'output'); } finally { Date.now=realNow; }
+ await cache.prune();assert.ok(!fs.existsSync(stale),'cache expires after all owners download');assert.ok(fs.existsSync(fresh),'untracked cache retained');
+ const { acquireRender, tryAcquireRenderMaintenance }=require('../src/server/editor/renderQueue.ts');
+ const releaseMaintenance=tryAcquireRenderMaintenance();assert.ok(releaseMaintenance);
+ let entered=false;
+ const renderer=acquireRender(new AbortController().signal).then(release=>{entered=true;return release;});
+ await Promise.resolve();assert.equal(entered,false,'cleanup excludes new render until deletion finishes');
+ releaseMaintenance();(await renderer)();
+ console.log('PASS: 48h boundary, undownloaded/partial batches, active jobs, restart receipts, repeat downloads, preview/range/cancel protection, cache expiry');
+}
+main().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>{
+ const target=path.resolve(scratch);
+ if(path.dirname(target)!==path.resolve(os.tmpdir())||!path.basename(target).startsWith('activity-delete-check-'))throw Error('Unsafe test cleanup');
+ fs.rmSync(target,{recursive:true,force:true});
+});

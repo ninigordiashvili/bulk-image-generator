@@ -164,6 +164,8 @@ function ShapeRow({
         </label>
       </div>
 
+      <details className="space-y-2">
+        <summary className="cursor-pointer text-xs text-accent">Shape settings</summary>
       <Slider
         label="Width"
         value={shape.width}
@@ -213,6 +215,7 @@ function ShapeRow({
         format={(value) => `${Math.round(value)}°`}
         onChange={(rotation) => onChange({ rotation })}
       />
+      </details>
     </div>
   );
 }

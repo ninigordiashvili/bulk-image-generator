@@ -1,5 +1,6 @@
 "use client";
 
+import { useEditorFonts } from "@/lib/editor/useEditorFonts";
 import { useMemo, useState } from "react";
 import { formatTime } from "@/lib/editor/format";
 import { parseClock } from "@/lib/editor/timestamp";
@@ -8,6 +9,9 @@ import { STYLE_ORDER, TEXT_STYLES, styleOf } from "@/lib/editor/textStyles";
 import { MAX_MOMENTS, type MomentAnimation, type TextMoment } from "@/types/editor";
 
 const ANIMATIONS: { value: MomentAnimation; label: string }[] = [
+  { value: "stagger", label: "Staggered digits" },
+  { value: "count", label: "Counting year" },
+  { value: "gentle", label: "Gentle rise (years)" },
   { value: "rise", label: "Rise from below" },
   { value: "fade", label: "Fade in place" },
   { value: "drop", label: "Drop from above" },
@@ -23,12 +27,10 @@ const ANIMATIONS: { value: MomentAnimation; label: string }[] = [
  * ticked here.
  */
 export function TextMoments({ disabled }: { disabled: boolean }) {
+  const fontError = useEditorFonts();
   const transcript = useEditorStore((state) => state.transcript);
   const candidates = useEditorStore((state) => state.candidates);
   const moments = useEditorStore((state) => state.moments);
-  const backdrops = useEditorStore((state) => state.backdrops);
-  const attachBackdrop = useEditorStore((state) => state.attachBackdrop);
-  const detachBackdrop = useEditorStore((state) => state.detachBackdrop);
   const setTranscript = useEditorStore((state) => state.setTranscript);
   const addMoment = useEditorStore((state) => state.addMoment);
   const addBlankMoment = useEditorStore((state) => state.addBlankMoment);
@@ -42,6 +44,7 @@ export function TextMoments({ disabled }: { disabled: boolean }) {
 
   return (
     <section className="panel space-y-3">
+      {fontError && <p role="alert" className="text-xs text-amber-400">{fontError}</p>}
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <p className="panel-title mb-0">Text on screen</p>
         {moments.length > 0 && (
@@ -118,12 +121,7 @@ export function TextMoments({ disabled }: { disabled: boolean }) {
           key={moment.id}
           moment={moment}
           disabled={disabled}
-          backdropLabel={
-            backdrops.find((plate) => plate.id === moment.backdropId)?.label ?? null
-          }
           onChange={(patch) => updateMoment(moment.id, patch)}
-          onAttach={(file) => attachBackdrop(moment.id, file)}
-          onDetach={() => detachBackdrop(moment.id)}
           onRemove={() => removeMoment(moment.id)}
         />
       ))}
@@ -150,18 +148,12 @@ export function TextMoments({ disabled }: { disabled: boolean }) {
 function MomentRow({
   moment,
   disabled,
-  backdropLabel,
   onChange,
-  onAttach,
-  onDetach,
   onRemove,
 }: {
   moment: TextMoment;
   disabled: boolean;
-  backdropLabel: string | null;
   onChange: (patch: Partial<TextMoment>) => void;
-  onAttach: (file: File) => void;
-  onDetach: () => void;
   onRemove: () => void;
 }) {
   const [startDraft, setStartDraft] = useState<string | null>(null);
@@ -209,8 +201,10 @@ function MomentRow({
         </button>
       </div>
 
+      <details className="space-y-2">
+        <summary className="cursor-pointer text-xs text-accent">Text effects</summary>
       <div className="space-y-1">
-        <span className="text-[11px] text-muted">Style</span>
+        <span className="text-[11px] text-muted">Font &amp; style</span>
         <div className="grid grid-cols-5 gap-1">
           {STYLE_ORDER.map((name) => {
             const spec = TEXT_STYLES[name];
@@ -233,7 +227,7 @@ function MomentRow({
                 <span
                   className="block truncate"
                   style={{
-                    fontFamily: spec.css,
+                    fontFamily: styleOf(name).css,
                     fontWeight: spec.weight,
                     textTransform: spec.uppercase ? "uppercase" : "none",
                   }}
@@ -284,94 +278,6 @@ function MomentRow({
             className="w-full accent-[var(--accent)] disabled:opacity-40"
           />
         </label>
-
-        {/* The plate. An effect on this moment: it appears and fades with the
-            text, and never takes a slot on the timeline the way a dropped
-            image would. */}
-        <div className="col-span-2 space-y-1.5">
-          <span className="flex items-baseline justify-between text-[11px] text-muted">
-            <span>Background image</span>
-            {backdropLabel && (
-              <button
-                type="button"
-                className="text-[11px] text-muted hover:text-foreground disabled:opacity-40"
-                disabled={disabled}
-                onClick={onDetach}
-              >
-                Remove
-              </button>
-            )}
-          </span>
-
-          {backdropLabel ? (
-            <p className="truncate rounded-md bg-surface-2 px-2 py-1 text-[11px] text-foreground">
-              {backdropLabel}
-            </p>
-          ) : (
-            <label className="block cursor-pointer rounded-md border border-dashed border-white/15 px-2 py-1.5 text-center text-[11px] text-muted hover:border-white/30">
-              Attach a plate (PNG with transparency)
-              <input
-                type="file"
-                accept="image/*"
-                className="hidden"
-                disabled={disabled}
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) onAttach(file);
-                  // Cleared so re-picking the same file fires again.
-                  event.target.value = "";
-                }}
-              />
-            </label>
-          )}
-
-          {backdropLabel && (
-            <div className="grid grid-cols-2 gap-2">
-              <label className="text-[11px] text-muted">
-                <span className="flex items-baseline justify-between">
-                  <span>Height</span>
-                  <span className="font-mono text-foreground">
-                    {moment.backdropHeight
-                      ? `${Math.round(moment.backdropHeight * 100)}%`
-                      : "auto"}
-                  </span>
-                </span>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={moment.backdropHeight ?? 0}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    onChange({ backdropHeight: Number(event.target.value) || undefined })
-                  }
-                  className="w-full accent-[var(--accent)] disabled:opacity-40"
-                />
-              </label>
-              <label className="text-[11px] text-muted">
-                <span className="flex items-baseline justify-between">
-                  <span>Opacity</span>
-                  <span className="font-mono text-foreground">
-                    {Math.round((moment.backdropOpacity ?? 1) * 100)}%
-                  </span>
-                </span>
-                <input
-                  type="range"
-                  min={0.05}
-                  max={1}
-                  step={0.05}
-                  value={moment.backdropOpacity ?? 1}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    onChange({ backdropOpacity: Number(event.target.value) })
-                  }
-                  className="w-full accent-[var(--accent)] disabled:opacity-40"
-                />
-              </label>
-            </div>
-          )}
-        </div>
 
         <label className="text-[11px] text-muted">
           <span className="flex items-baseline justify-between">
@@ -443,7 +349,15 @@ function MomentRow({
             ))}
           </select>
         </label>
+        {(moment.animation === "stagger" || moment.animation === "count") && (
+          <p className="col-span-2 text-[11px] text-muted">
+            {moment.animation === "stagger"
+              ? (/^\d{1,6}$/.test(moment.text.trim()) ? "Digits appear one by one in fixed positions." : "Enter 1-6 digits for this effect. Other text uses a fade.")
+              : (/^\d{4}$/.test(moment.text.trim()) ? "Counts up from 20 years earlier, slows down, then holds your year." : "Enter a four-digit year, such as 1969. Other text uses a fade.")}
+          </p>
+        )}
       </div>
+      </details>
     </div>
   );
 }

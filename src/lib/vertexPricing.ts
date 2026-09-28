@@ -35,7 +35,7 @@ export interface Rate {
  */
 const IMAGE_RATES: Record<string, number> = {
   "gemini-2.5-flash-image": 0.04,
-  "gemini-3.1-flash-lite-image": 0.02,
+  "gemini-3.1-flash-lite-image": 0.0336,
   "gemini-3-pro-image-preview": 0.13,
   "imagen-4.0-fast-generate-001": 0.02,
   "imagen-4.0-generate-001": 0.04,
@@ -54,9 +54,8 @@ const VIDEO_RATES_SILENT: Record<string, number> = {
 };
 
 const VIDEO_RATES_AUDIO: Record<string, number> = {
-  // Unverified: audio is known to cost more, but by how much is not confirmed.
-  // Override with VERTEX_PRICE_VIDEO_AUDIO_veo-3.1-lite-generate-001=…
-  "veo-3.1-lite-generate-001": 0.15,
+  // Google pricing checked 2026-09-10; these are the 720p rates.
+  "veo-3.1-lite-generate-001": 0.05,
 };
 
 /**
@@ -65,7 +64,7 @@ const VIDEO_RATES_AUDIO: Record<string, number> = {
  * however plausible it looks — the point of the flag is that a number nobody
  * checked never gets presented as a bill.
  *
- * Confirmed by the user on 2026-08-29: $0.02 per image for
+ * Confirmed by the user on 2026-09-22: $0.0336 per 1K image for
  * gemini-3.1-flash-lite-image, and $0.03 per second of silent video for
  * veo-3.1-lite-generate-001. Both already matched the placeholder, so no total
  * changes — only how much they can be trusted.
@@ -73,6 +72,7 @@ const VIDEO_RATES_AUDIO: Record<string, number> = {
 const CONFIRMED = new Set([
   "image:gemini-3.1-flash-lite-image",
   "video:silent:veo-3.1-lite-generate-001",
+  "video:audio:veo-3.1-lite-generate-001",
 ]);
 
 const DEFAULT_IMAGE_USD = 0.04;
@@ -96,9 +96,13 @@ export function imageRate(model: string): Rate {
   };
 }
 
-export function videoRate(model: string, withAudio = false): Rate {
+export function videoRate(model: string, withAudio = false, resolution = "720p"): Rate {
   const custom = override(withAudio ? "VIDEO_AUDIO" : "VIDEO", model);
   if (custom !== null) return { usd: custom, unit: "second", verified: true };
+
+  if (model === "veo-3.1-lite-generate-001" && resolution === "1080p") {
+    return { usd: withAudio ? 0.08 : 0.05, unit: "second", verified: true };
+  }
 
   const table = withAudio ? VIDEO_RATES_AUDIO : VIDEO_RATES_SILENT;
   const known = table[model];

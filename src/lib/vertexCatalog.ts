@@ -56,6 +56,8 @@ export const VERTEX_CATALOG_MODELS: readonly KieModelSpec[] = VERTEX_IMAGE_MODEL
     docUrl: "https://cloud.google.com/vertex-ai/generative-ai/pricing",
     // Gemini takes a long prompt; this is well inside it and only guards the UI.
     promptMax: 8000,
+    imageField: "referenceImages",
+    imageMax: model.maxReferences,
     options: optionsFor(model.id),
   })
 );

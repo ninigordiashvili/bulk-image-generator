@@ -13,7 +13,7 @@
  */
 
 /** Which kie API a model is reached through — they poll differently too. */
-export type VideoApi = "veo" | "jobs" | "vertex";
+export type VideoApi = "veo" | "jobs" | "vertex" | "heygen";
 
 /**
  * What supplies the clip's content and length.
@@ -34,7 +34,7 @@ export interface VideoModelSpec {
    * they are not the same thing — one bills kie.ai credits, the other Google
    * Cloud — so the picker must never show them together.
    */
-  provider: "kie" | "vertex";
+  provider: "kie" | "vertex" | "heygen";
   input: VideoInput;
   /** Model string sent in the request body. */
   requestModel: string;
@@ -66,6 +66,14 @@ const GROK_15_DURATIONS = Array.from({ length: 15 }, (_, index) => index + 1);
 const SEEDANCE_DURATIONS = Array.from({ length: 9 }, (_, index) => index + 4);
 
 export const VIDEO_MODELS: readonly VideoModelSpec[] = [
+  ...(["avatar_iv", "avatar_iii", "avatar_v"] as const).map((engine): VideoModelSpec => ({
+    id: "heygen:" + engine, label: "HeyGen Avatar " + engine.slice(7).toUpperCase(),
+    api: "heygen", provider: "heygen", input: "audio", requestModel: engine,
+    docUrl: "https://developers.heygen.com/audio-to-video", durations: [], defaultDuration: 0,
+    resolutions: ["720p", "1080p", "4k"], defaultResolution: "1080p",
+    aspectRatios: ["auto", "16:9", "9:16", "1:1", "4:5", "5:4"], defaultAspectRatio: "auto",
+    maxAudioSeconds: 1800, blurb: "Talking avatar driven by your selected audio. Estimate: $1/minute.",
+  })),
   {
     id: "veo3_lite",
     label: "Veo 3.1 Lite",
@@ -206,24 +214,24 @@ const BY_ID = new Map(VIDEO_MODELS.map((model) => [model.id, model]));
 
 /** The models one provider's account can actually run. */
 export function videoModelsFor(
-  provider: "kie" | "vertex"
+  provider: "kie" | "vertex" | "heygen"
 ): readonly VideoModelSpec[] {
   return VIDEO_MODELS.filter((model) => model.provider === provider);
 }
 
 /** The model a provider falls back to when the current one is the other's. */
-export function defaultVideoModelFor(provider: "kie" | "vertex"): string {
+export function defaultVideoModelFor(provider: "kie" | "vertex" | "heygen"): string {
   return videoModelsFor(provider)[0]?.id ?? DEFAULT_VIDEO_MODEL;
 }
 
-export const DEFAULT_VIDEO_MODEL = VIDEO_MODELS[0].id;
+export const DEFAULT_VIDEO_MODEL = "veo3_lite";
 
 export function findVideoModel(id: string): VideoModelSpec | undefined {
   return BY_ID.get(id);
 }
 
 export function videoModel(id: string): VideoModelSpec {
-  return BY_ID.get(id) ?? VIDEO_MODELS[0];
+  return BY_ID.get(id) ?? BY_ID.get(DEFAULT_VIDEO_MODEL)!;
 }
 
 /**
@@ -237,9 +245,9 @@ export function clampToModel(
 ): { duration: number; resolution: string; aspectRatio: string } {
   // An audio-driven model has no size options to snap to, and its row keeps
   // whatever the other models left behind so switching back is lossless.
-  if (spec.input === "audio") return settings;
+  if (spec.input === "audio" && spec.provider !== "heygen") return settings;
 
-  const duration = spec.durations.includes(settings.duration)
+  const duration = spec.input === "audio" ? settings.duration : spec.durations.includes(settings.duration)
     ? settings.duration
     : nearest(spec.durations, settings.duration);
   return {

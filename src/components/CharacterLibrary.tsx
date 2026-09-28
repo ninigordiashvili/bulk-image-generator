@@ -1,4 +1,5 @@
 "use client";
+import { HelpTip } from "./HelpTip";
 
 import { useRef, useState } from "react";
 import Image from "next/image";
@@ -46,7 +47,7 @@ export function CharacterLibrary({ disabled }: { disabled: boolean }) {
   return (
     <section className="panel">
       <div className="mb-3 flex items-baseline justify-between">
-        <h2 className="panel-title mb-0">Character library</h2>
+        <div className="flex items-center gap-2"><h2 className="panel-title mb-0">Character library</h2><HelpTip label="Reference images">Use @1, @2 and so on in prompts to attach a reference. Pinned images are attached to every prompt.</HelpTip></div>
         <span className="text-xs text-muted">
           {characters.length} refs · {pinnedCount} pinned
         </span>
@@ -71,9 +72,7 @@ export function CharacterLibrary({ disabled }: { disabled: boolean }) {
         } ${disabled ? "cursor-not-allowed opacity-50" : "hover:border-accent"}`}
       >
         <span className="text-muted">
-          Drop reference images here, or click to pick. Each gets the next number —
-          use <code className="text-foreground">@1</code>,{" "}
-          <code className="text-foreground">@2</code> in prompts.
+          Drop reference images here or click to browse.
         </span>
       </div>
 

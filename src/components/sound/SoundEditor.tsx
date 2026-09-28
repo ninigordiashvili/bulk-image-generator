@@ -26,6 +26,10 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
   const maxGap = useVoiceoverStore((state) => state.maxGap);
   const keepGap = useVoiceoverStore((state) => state.keepGap);
   const leadIn = useVoiceoverStore((state) => state.leadIn);
+  const evenVolume = useVoiceoverStore((state) => state.evenVolume);
+  const shortenPauses = useVoiceoverStore((state) => state.shortenPauses);
+  const setShortenPauses = useVoiceoverStore((state) => state.setShortenPauses);
+  const setEvenVolume = useVoiceoverStore((state) => state.setEvenVolume);
 
   const addFiles = useVoiceoverStore((state) => state.addFiles);
   const remove = useVoiceoverStore((state) => state.remove);
@@ -189,7 +193,28 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
 
         <div className="space-y-4">
           <div className="panel space-y-3">
+            <p className="panel-title">Volume</p>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={evenVolume} disabled={locked}
+                onChange={(event) => setEvenVolume(event.target.checked)}
+                className="accent-[var(--accent)]" />
+              Even out volume
+            </label>
+            <p className="text-xs text-muted">
+              Gently balances quiet and loud passages without changing pitch or speed.
+              This adds no cuts; the pause settings below still apply.
+              Quiet background noise may also become more audible.
+            </p>
+          </div>
+          <div className="panel space-y-3">
             <p className="panel-title">Pauses</p>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={shortenPauses} disabled={locked}
+                onChange={(event) => setShortenPauses(event.target.checked)} className="accent-[var(--accent)]" />
+              Shorten long pauses
+            </label>
+            {!shortenPauses && <p className="text-xs text-muted">All audio and pauses are preserved. Only joining and optional volume leveling are applied.</p>}
+            <fieldset disabled={locked || !shortenPauses} className="space-y-3 disabled:opacity-50">
 
             <label className="block">
               <span className="flex items-baseline justify-between text-xs text-muted">
@@ -272,6 +297,7 @@ export function SoundEditor({ renderable }: { renderable: boolean }) {
               goes, never how close to a word it gets.
             </p>
 
+            </fieldset>
             <button
               type="button"
               onClick={() => void join()}

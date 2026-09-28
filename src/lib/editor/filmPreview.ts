@@ -41,7 +41,7 @@ interface Preset {
  * an eight-bit channel before the encoder smooths them. A preview grainier than
  * the export misleads exactly as much as one with no grain at all.
  */
-const PRESETS: Record<Exclude<FilmLook, "off">, Preset> = {
+const PRESETS: Record<"subtle" | "medium" | "heavy", Preset> = {
   subtle: { grainAlpha: 0.045, grainPasses: 1, tileScale: 1, vignette: 0.28, saturate: 0.9, contrast: 1.03,
     flicker: { a1: 0.004, p1: 12.7, a2: 0.003, p2: 7.3, pulse: 0.016, every: 9.1, width: 0.13 } },
   medium: { grainAlpha: 0.11, grainPasses: 1, tileScale: 1, vignette: 0.42, saturate: 0.76, contrast: 1.08,
@@ -112,6 +112,24 @@ export function applyLook(
 
   if (look === "off") {
     paint();
+    return;
+  }
+  if (look !== 'subtle' && look !== 'medium' && look !== 'heavy') {
+    context.save();
+    context.filter = look === 'monochrome' ? 'grayscale(1)' : look === 'sepia' ? 'sepia(1)' : 'none';
+    paint();
+    context.restore();
+    if (look === 'warm' || look === 'cool') {
+      // Match the export channel multipliers with a multiply tint.
+      context.save(); context.globalCompositeOperation = 'multiply';
+      context.fillStyle = look === 'warm' ? 'rgb(255,242,224)' : 'rgb(224,242,255)';
+      context.fillRect(0, 0, width, height); context.restore();
+    }
+    if (look === 'vignette') {
+      const gradient = context.createRadialGradient(width/2,height/2,Math.min(width,height)*0.25,width/2,height/2,Math.max(width,height)*0.72);
+      gradient.addColorStop(0,'rgba(0,0,0,0)'); gradient.addColorStop(1,'rgba(0,0,0,0.42)');
+      context.save();context.fillStyle=gradient;context.fillRect(0,0,width,height);context.restore();
+    }
     return;
   }
   const preset = PRESETS[look];

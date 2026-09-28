@@ -25,10 +25,8 @@ export interface Job {
 }
 
 /** Uploads and intermediates are scratch — they live in the OS temp dir. */
-const ROOT = path.join(os.tmpdir(), "bulk-generator-editor");
+const ROOT = process.env.EDITOR_WORK_ROOT || path.join(os.tmpdir(), "bulk-generator-editor");
 
-/** Jobs older than this are swept when a new one is created. */
-const MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Held on globalThis rather than in a module-level const: the dev server
@@ -49,8 +47,12 @@ export function getJob(id: string): Job | undefined {
   return JOB_ID.test(id) ? registry.get(id) : undefined;
 }
 
+/** Shared activity view, including exports whose browser has gone away. */
+export function listJobs(): Job[] {
+  return [...registry.values()].filter(job => job.startedAt > 0);
+}
+
 export async function createJob(): Promise<Job> {
-  await sweep();
   const id = randomBytes(8).toString("hex");
   const dir = path.join(ROOT, id);
   await fs.mkdir(path.join(dir, "images"), { recursive: true });
@@ -138,34 +140,20 @@ export async function discardJob(id: string): Promise<void> {
   // a server reload empties the registry and leaves the directory, and the tab
   // that made it is the only thing that will ever ask for it to go. Skipping
   // the removal there left hundreds of megabytes of scratch behind until the
-  // six-hour sweep noticed.
+  // user explicitly discarded it.
   await fs.rm(path.join(ROOT, id), { recursive: true, force: true }).catch(() => {});
 }
 
-/**
- * Drops stale job directories. Renders write hundreds of megabytes of
- * intermediates, and a tab closed mid-export would otherwise leave them behind
- * until the OS got round to clearing its temp dir.
- */
-async function sweep(): Promise<void> {
-  const cutoff = Date.now() - MAX_AGE_MS;
-
-  for (const [id, job] of registry) {
-    if (job.createdAt < cutoff && !job.controller) {
-      registry.delete(id);
-      await fs.rm(job.dir, { recursive: true, force: true }).catch(() => {});
-    }
+/** Activity deletion must never abort an export. */
+export async function deleteJobHistory(id: string): Promise<void> {
+  const job = getJob(id);
+  if (!job) throw new Error("Export not found.");
+  if (job.controller || !["done", "error", "cancelled"].includes(job.status.phase)) {
+    throw new Error("This export is still active. Wait until it finishes before deleting it.");
   }
-
-  const entries = await fs.readdir(ROOT, { withFileTypes: true }).catch(() => []);
-  for (const entry of entries) {
-    if (!entry.isDirectory() || registry.has(entry.name)) continue;
-    const dir = path.join(ROOT, entry.name);
-    const stat = await fs.stat(dir).catch(() => null);
-    // Orphans from a previous server process: nothing is tracking them, so age
-    // is the only signal, and anything old enough is safe to remove.
-    if (stat && stat.mtimeMs < cutoff) {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-    }
-  }
+  const target = path.resolve(ROOT, id);
+  if (path.dirname(target) !== path.resolve(ROOT)) throw new Error("Invalid export directory.");
+  registry.delete(id);
+  try { await fs.rm(target, { recursive: true, force: true }); }
+  catch (error) { registry.set(id, job); throw error; }
 }

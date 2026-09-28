@@ -43,7 +43,12 @@ import { resolveInside, type Job } from "./jobs";
  * cuts around whatever survived that test rather than through it.
  */
 
+// Gain smoothing only: no gate, EQ, pitch, tempo, or silence removal.
+export const VOLUME_LEVELING_FILTER = "dynaudnorm=f=250:g=15:p=0.8:m=4:r=0.12:b=1,alimiter=limit=0.89:level=0:latency=1,asetpts=N/SR/TB";
+
 export interface PaceOptions {
+  evenVolume?: boolean;
+  shortenPauses?: boolean;
   /** A pause longer than this is too long. */
   maxGap: number;
   /** What a too-long pause is shortened to. */
@@ -669,9 +674,11 @@ export async function joinVoiceovers(
 
     // A pause has to be at least `maxGap` to be worth reporting at all.
     const { silences, islands } = detectSilences(levels, thresholdDb, options.maxGap);
-    const cuts = keepIslands(excessOf(silences, options), islands);
+    const cuts = options.shortenPauses === false ? [] : keepIslands(excessOf(silences, options), islands);
     const removed = cuts.reduce((sum, cut) => sum + (cut.end - cut.start), 0);
     const select = selectExpression(cuts);
+    // Level only after pause detection, so gain changes cannot create new cuts.
+    const filters = [select, options.evenVolume ? VOLUME_LEVELING_FILTER : ""].filter(Boolean).join(",");
 
     // Both formats from the same tightened audio, so they can't drift apart.
     // Encoding twice costs a second or two on a track of any realistic length.
@@ -679,7 +686,7 @@ export async function joinVoiceovers(
       FFMPEG,
       ["-hide_banner", "-loglevel", "error", "-nostdin", "-y",
        "-i", joined,
-       ...(select ? ["-af", select] : []),
+       ...(filters ? ["-af", filters] : []),
        "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "1",
        "-movflags", "+faststart", output],
       { signal }
@@ -688,7 +695,7 @@ export async function joinVoiceovers(
       FFMPEG,
       ["-hide_banner", "-loglevel", "error", "-nostdin", "-y",
        "-i", joined,
-       ...(select ? ["-af", select] : []),
+       ...(filters ? ["-af", filters] : []),
        "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", "1",
        outputMp3],
       { signal }
@@ -701,7 +708,7 @@ export async function joinVoiceovers(
     const kept = keptLength(options);
     const longestGap = silences.reduce((longest: number, silence: Silence) => {
       const length = silence.end - silence.start;
-      return Math.max(longest, length > options.maxGap ? Math.min(length, kept) : length);
+      return Math.max(longest, options.shortenPauses !== false && length > options.maxGap ? Math.min(length, kept) : length);
     }, 0);
 
     return {

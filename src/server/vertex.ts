@@ -1,4 +1,6 @@
-import { GoogleGenAI } from "@google/genai";
+import { readUsage, saveUsage, reservedBatchUsd } from "./vertexUsage";
+import { createHash } from "node:crypto";
+import { GoogleGenAI, type GenerateVideosOperation } from "@google/genai";
 import {
   findVertexImageModel,
   findVertexVideoModel,
@@ -42,7 +44,7 @@ const LOCATION =
   process.env.GOOGLE_CLOUD_LOCATION || process.env.VERTEX_LOCATION || "us-central1";
 
 /**
- * How many Vertex calls may be in flight for the whole server, and how closely
+ * How many Vertex calls may be in flight for each account, and how closely
  * their starts may be spaced.
  *
  * These are separate limits because they fail differently. Concurrency bounds
@@ -52,18 +54,13 @@ const LOCATION =
  * images fired three-at-a-time still arrive as a burst if each returns quickly.
  */
 /**
- * Concurrency is per kind, not shared. Images and video draw on separate GCP
+ * Concurrency is per account and kind. Images and video draw on separate GCP
  * quotas (2/min and 1/min here), so one pool would let a batch of video starve
  * the stills or the reverse. Two lanes keep each within its own limit.
  */
 const CONCURRENCY_IMAGE = positiveInt(process.env.VERTEX_CONCURRENCY_IMAGE, 2);
 const CONCURRENCY_VIDEO = positiveInt(process.env.VERTEX_CONCURRENCY_VIDEO, 1);
 const QPM = positiveInt(process.env.VERTEX_QPM, 60);
-
-/** Attempts per call before a 429 is handed back to the queue as retryable. */
-const MAX_ATTEMPTS = positiveInt(process.env.VERTEX_MAX_ATTEMPTS, 4);
-const BACKOFF_BASE_MS = 2_000;
-const BACKOFF_CAP_MS = 120_000;
 
 /** How long a video operation may stay unfinished before we stop waiting. */
 const VIDEO_TIMEOUT_MS = positiveInt(process.env.VERTEX_VIDEO_TIMEOUT_MS, 600_000);
@@ -79,8 +76,8 @@ export class VertexError extends Error {
     message: string,
     /**
      * Mirrors the kie client's contract so the queue can treat both providers
-     * alike: `false` means nothing about a second attempt would differ, so the
-     * retry budget is not spent on it.
+     * alike. The queue retries every failed prompt once; this hint also helps
+     * distinguish provider errors from temporary polling failures.
      */
     readonly retryable: boolean,
     readonly status?: number
@@ -101,12 +98,12 @@ interface Lane {
 }
 
 interface Limiter {
-  lanes: Record<"image" | "video", Lane>;
+  lanes: Map<string, Lane>;
   /**
    * Earliest time the next call may start, *per model*. Vertex quota is granted
    * per base model — 2/min for the image models, 1/min for Veo — so one shared
-   * rate would either starve the images or overrun the video. Concurrency stays
-   * global because that bounds work in flight, not request rate.
+   * rate would either starve the images or overrun the video. Rates are shared
+   * only by accounts using the same Google Cloud project and model.
    */
   nextStart: Map<string, number>;
 }
@@ -114,7 +111,7 @@ interface Limiter {
 const limiter: Limiter = ((
   globalThis as { __vertexLimiter?: Limiter }
 ).__vertexLimiter ??= {
-  lanes: { image: { active: 0, waiting: [] }, video: { active: 0, waiting: [] } },
+  lanes: new Map(),
   nextStart: new Map(),
 });
 
@@ -123,23 +120,23 @@ const limiter: Limiter = ((
 // `nextStart` changed from a number to a per-model Map, the stale object kept
 // the number and every call threw. Re-shaping here costs nothing and turns a
 // crash into a dropped schedule.
-if (!(limiter.nextStart instanceof Map) || !limiter.lanes?.image) {
-  limiter.nextStart = new Map();
-  limiter.lanes = {
-    image: { active: 0, waiting: [] },
-    video: { active: 0, waiting: [] },
-  };
-}
+if (!(limiter.nextStart instanceof Map)) limiter.nextStart = new Map();
+if (!(limiter.lanes instanceof Map)) limiter.lanes = new Map();
 
-const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new VertexError("Cancelled.", false)); return; }
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, ms);
+    const abort = () => { clearTimeout(timer); reject(new VertexError("Cancelled.", false)); };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
 
 /**
  * Admits one call, then holds the slot until `release` is called.
  *
- * Spacing is claimed *before* the wait, not after it — `nextStart` moves forward
- * the moment a caller is admitted, so twenty callers arriving together take
- * twenty distinct slots instead of all reading the same timestamp, waiting the
- * same interval and departing as one burst.
+ * Claim each start only after waiting and rechecking the shared deadline.
+ * A quota cooldown therefore also delays callers that were already waiting.
  */
 async function acquire(
   account: VertexAccount,
@@ -149,7 +146,12 @@ async function acquire(
 ): Promise<() => void> {
   if (signal?.aborted) throw new VertexError("Cancelled.", false);
 
-  const lane = limiter.lanes[kind];
+  const laneKey = `${account.projectId}:${account.id}:${kind}`;
+  let lane = limiter.lanes.get(laneKey);
+  if (!lane) {
+    lane = { active: 0, waiting: [] };
+    limiter.lanes.set(laneKey, lane);
+  }
   // The account's own figure wins, and it is re-read from disk on every request,
   // so widening a lane mid-batch needs no restart — which matters because a
   // restart reloads the page and the storyboard is not persisted.
@@ -159,7 +161,17 @@ async function acquire(
       : (account.imageConcurrency ?? CONCURRENCY_IMAGE);
 
   while (lane.active >= ceiling) {
-    await new Promise<void>((resume) => lane.waiting.push(resume));
+    const waiting = lane;
+    await new Promise<void>((resolve, reject) => {
+      const resume = () => { signal?.removeEventListener("abort", abort); resolve(); };
+      const abort = () => {
+        const index = waiting.waiting.indexOf(resume);
+        if (index >= 0) waiting.waiting.splice(index, 1);
+        reject(new VertexError("Cancelled.", false));
+      };
+      waiting.waiting.push(resume);
+      signal?.addEventListener("abort", abort, { once: true });
+    });
     if (signal?.aborted) throw new VertexError("Cancelled.", false);
   }
 
@@ -174,12 +186,9 @@ async function acquire(
   const qpm = Math.min(QPM, perAccount ?? requestsPerMinuteFor(model, QPM));
   const interval = Math.ceil(60_000 / Math.max(1, qpm));
 
-  // Keyed by account too: two accounts have separate quota pools and must not
-  // queue behind each other.
-  const rateKey = `${account.id}:${model}`;
-  const now = Date.now();
-  const startAt = Math.max(now, limiter.nextStart.get(rateKey) ?? 0);
-  limiter.nextStart.set(rateKey, startAt + interval);
+  // Different projects have independent quotas; aliases of one project share its quota.
+  const rateKey = `${account.projectId}:${model}`;
+
 
   let released = false;
   const release = () => {
@@ -189,17 +198,22 @@ async function acquire(
     lane.waiting.shift()?.();
   };
 
-  if (startAt > now) {
-    try {
-      await sleep(startAt - now);
-    } catch {
-      release();
-      throw new VertexError("Cancelled.", false);
+  try {
+    while (true) {
+      if (signal?.aborted) throw new VertexError("Cancelled.", false);
+      const now = Date.now();
+      const wait = (limiter.nextStart.get(rateKey) ?? 0) - now;
+      if (wait <= 0) {
+        // No await between checking and claiming: concurrent callers cannot
+        // consume the same slot. Failed attempts count toward the rate too.
+        limiter.nextStart.set(rateKey, now + interval);
+        break;
+      }
+      await sleep(Math.min(wait, 2_147_483_647), signal);
     }
-  }
-  if (signal?.aborted) {
+  } catch (error) {
     release();
-    throw new VertexError("Cancelled.", false);
+    throw error;
   }
 
   return release;
@@ -234,11 +248,12 @@ function genai(account: VertexAccount, location: string): GoogleGenAI {
       false
     );
   }
-  const key = `${account.id}:${location}`;
+  const key = JSON.stringify([account.id, account.projectId, account.credentials, location]);
   let client = clients.get(key);
   if (!client) {
     client = new GoogleGenAI({
       vertexai: true,
+      httpOptions: { retryOptions: { attempts: 1 } },
       project: account.projectId,
       location,
       // "adc" means the machine login; anything else is a credentials file, which
@@ -266,7 +281,8 @@ export function vertexTarget(): { project: string; location: string } {
 function describe(error: unknown): { message: string; status?: number } {
   if (error instanceof VertexError) return { message: error.message, status: error.status };
   const raw = error instanceof Error ? error.message : String(error);
-  const status = Number(/\b(4\d\d|5\d\d)\b/.exec(raw)?.[1]);
+  const fields = error as { status?: number; code?: number } | null;
+  const status = Number(fields?.status ?? fields?.code ?? /\b(4\d\d|5\d\d)\b/.exec(raw)?.[1]);
   try {
     const parsed = JSON.parse(/\{[\s\S]*\}/.exec(raw)?.[0] ?? "");
     const inner = parsed?.error ?? parsed;
@@ -317,7 +333,7 @@ function classify(error: unknown): VertexError {
       404
     );
   }
-  if (status === 429 || lower.includes("resource_exhausted") || lower.includes("quota")) {
+  if (status === 429 || (!status && (lower.includes("resource_exhausted") || lower.includes("quota exceeded") || lower.includes("quota exhausted")))) {
     return new VertexError(
       `Vertex quota exhausted for project ${PROJECT} (429). Lower VERTEX_QPM or ` +
         `request more quota. Raw: ${message}`,
@@ -334,64 +350,47 @@ function classify(error: unknown): VertexError {
   return new VertexError(message || "Vertex call failed.", true, status);
 }
 
-/** Seconds Vertex asked us to wait, when it says so. */
+/** Respect Google's Retry-After header and structured RetryInfo delay. */
 function retryAfterMs(error: unknown): number | null {
-  const { message } = describe(error);
-  const match = /retry(?:\s|-)?(?:after|delay)"?[:\s]+"?(\d+(?:\.\d+)?)s?/i.exec(message);
-  return match ? Math.ceil(Number(match[1]) * 1000) : null;
+  const value = error as { response?: { headers?: Headers | Record<string, string> }; headers?: Headers | Record<string, string> } | null;
+  const headers = value?.response?.headers ?? value?.headers;
+  const header = headers instanceof Headers ? headers.get("retry-after") : headers?.["retry-after"];
+  const waits: number[] = [];
+  if (header) {
+    const seconds = Number(header);
+    const wait = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now();
+    if (Number.isFinite(wait) && wait >= 0) waits.push(wait);
+  }
+  // The SDK preserves Google's JSON error, including RetryInfo, in message.
+  const raw = error instanceof Error ? error.message : JSON.stringify(error) ?? "";
+  const match = /retry(?:\s|-)?(?:after|delay)"?[:\s]+"?(\d+(?:\.\d+)?)s?/i.exec(raw);
+  if (match) waits.push(Number(match[1]) * 1000);
+  return waits.length ? Math.ceil(Math.max(...waits)) : null;
 }
 
-/**
- * One Vertex call, limited and retried.
- *
- * Only 429 and 5xx come back here for another go. Everything else — a bad model
- * id, a project without access, malformed input — fails identically every time,
- * so retrying it just multiplies the wait before the operator sees the message
- * that would have told them what to fix.
- */
+/** Quota failures wait and retry until success or cancellation. Other failures
+ * retain the browser queue's one-retry policy. Every attempt uses the limiter. */
 async function call<T>(
-  account: VertexAccount,
-  model: string,
-  kind: "image" | "video",
-  run: () => Promise<T>,
-  signal?: AbortSignal,
-  label = "Vertex"
+  account: VertexAccount, model: string, kind: "image" | "video",
+  run: () => Promise<T>, signal?: AbortSignal, label = "Vertex"
 ): Promise<T> {
-  let attempt = 0;
-
-  for (;;) {
-    attempt += 1;
+  let quotaFailures = 0;
+  while (true) {
     const release = await acquire(account, model, kind, signal);
-    try {
-      return await run();
-    } catch (error) {
+    try { return await run(); }
+    catch (error) {
+      if (signal?.aborted) throw new VertexError("Cancelled.", false);
       const failure = classify(error);
-      const last = attempt >= MAX_ATTEMPTS;
-
-      if (!failure.retryable || last) {
-        if (failure.retryable && last) {
-          throw new VertexError(
-            `${label} still failing after ${MAX_ATTEMPTS} attempts. ${failure.message}`,
-            true,
-            failure.status
-          );
-        }
-        throw failure;
+      if (failure.status !== 429) {
+        throw new VertexError(label + ": " + failure.message, failure.retryable, failure.status);
       }
-
-      // Full jitter: a batch that hits the same quota wall at the same instant
-      // must not come back in step and hit it again together.
-      const asked = retryAfterMs(error);
-      const backoff = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (attempt - 1));
-      const wait = asked ?? Math.round(backoff * (0.5 + Math.random() * 0.5));
-
-      if (failure.status === 429) penalise(`${account.id}:${model}`, wait);
-      release();
-      await sleep(wait);
-      continue;
-    } finally {
-      release();
-    }
+      // Start at 30 seconds, double up to five minutes, with a little jitter.
+      // Google's longer requested delay always wins. The cooldown is shared
+      // with every browser using this project/model, including queued calls.
+      const backoff = Math.min(300_000, 30_000 * 2 ** Math.min(quotaFailures++, 4));
+      const delay = Math.max(backoff + Math.floor(Math.random() * 3000), retryAfterMs(error) ?? 0);
+      penalise(account.projectId + ":" + model, delay);
+    } finally { release(); }
   }
 }
 
@@ -441,8 +440,14 @@ if (!(ledger.reserved instanceof Map)) ledger.reserved = new Map();
 
 /** Bounded so a long-lived dev server can't grow the ledger without limit. */
 const LEDGER_MAX = 5_000;
+const migration = globalThis as typeof globalThis & { __vertexUsageMigrated?: boolean };
+if (!migration.__vertexUsageMigrated) {
+  for (const entry of ledger.entries) saveUsage(entry, true);
+  migration.__vertexUsageMigrated = true;
+}
 
 function record(entry: UsageEntry) {
+  saveUsage(entry);
   ledger.entries.push(entry);
   if (ledger.entries.length > LEDGER_MAX) {
     ledger.entries.splice(0, ledger.entries.length - LEDGER_MAX);
@@ -450,7 +455,7 @@ function record(entry: UsageEntry) {
 }
 
 export function spentUsd(accountId?: string): number {
-  return ledger.entries.reduce(
+  return readUsage().entries.reduce(
     (total, entry) =>
       accountId && entry.accountId !== accountId ? total : total + entry.usd,
     0
@@ -458,12 +463,14 @@ export function spentUsd(accountId?: string): number {
 }
 
 export function usageSummary() {
+  const history = readUsage();
+  const entries = history.entries;
   const spent = spentUsd();
   const budget = creditBudgetUsd();
   const cap = spendCapUsd();
   const byModel = new Map<string, { units: number; usd: number; kind: string; calls: number }>();
 
-  for (const entry of ledger.entries) {
+  for (const entry of entries) {
     const row = byModel.get(entry.model) ?? { units: 0, usd: 0, kind: entry.kind, calls: 0 };
     row.units += entry.units;
     row.usd += entry.usd;
@@ -474,7 +481,7 @@ export function usageSummary() {
   // Grouped by account as well as by model: with two Google accounts the only
   // number that matters when choosing one is what is left on *that* account.
   const byAccount = new Map<string, { usd: number; calls: number }>();
-  for (const entry of ledger.entries) {
+  for (const entry of entries) {
     const row = byAccount.get(entry.accountId) ?? { usd: 0, calls: 0 };
     row.usd += entry.usd;
     row.calls += 1;
@@ -482,7 +489,8 @@ export function usageSummary() {
   }
 
   return {
-    since: ledger.since,
+    since: entries.length ? Math.min(...entries.map(entry => entry.at)) : ledger.since,
+    persistenceError: history.error,
     spentUsd: Number(spent.toFixed(4)),
     byAccount: [...byAccount.entries()].map(([accountId, row]) => ({
       accountId,
@@ -493,7 +501,7 @@ export function usageSummary() {
     remainingUsd: Number(Math.max(0, budget - spent).toFixed(4)),
     spendCapUsd: cap,
     capRemainingUsd: cap === null ? null : Number(Math.max(0, cap - spent).toFixed(4)),
-    calls: ledger.entries.length,
+    calls: entries.length,
     byModel: [...byModel.entries()].map(([model, row]) => ({
       model,
       kind: row.kind,
@@ -501,7 +509,7 @@ export function usageSummary() {
       units: Number(row.units.toFixed(2)),
       usd: Number(row.usd.toFixed(4)),
     })),
-    recent: ledger.entries.slice(-20),
+    recent: entries.slice(-20),
     /**
      * Whether any model *currently* in the ledger is still priced from an
      * unconfirmed rate. Read from today's table rather than from the flag each
@@ -514,8 +522,7 @@ export function usageSummary() {
       row.kind === "video" ? !videoRate(model).verified : !imageRate(model).verified
     ),
     note:
-      "Spend is estimated locally: Google publishes no API for remaining credit " +
-      "on a billing account. Counts are exact; dollars depend on the rate table.",
+      "Estimated recorded app spending only. Earlier and external usage, pending jobs, other charges and credit expiry are excluded.",
   };
 }
 
@@ -543,14 +550,14 @@ function noteSpend(
   });
 }
 
-function guardSpend(account: VertexAccount, estimate: number): () => void {
+export function guardSpend(account: VertexAccount, estimate: number): () => void {
   // The account's own ceiling wins; the env value is the fallback for an
   // account that sets none.
   const cap = account.spendCapUsd ?? spendCapUsd();
   const held = ledger.reserved.get(account.id) ?? 0;
 
   if (cap !== null) {
-    const committed = spentUsd(account.id) + held;
+    const committed = spentUsd(account.id) + held + reservedBatchUsd(account.id);
     if (committed + estimate > cap) {
       throw new VertexError(
         `Refusing to spend: this call would take account "${account.id}" to about ` +
@@ -586,6 +593,7 @@ export interface ImageRequest {
   aspectRatio?: string;
   /** `imageConfig.imageSize` — the resolution tier, e.g. "1K". */
   imageSize?: string;
+  referenceImages?: { label?: string; base64: string; mimeType: string }[];
   negativePrompt?: string;
   seed?: number;
   /** Vertex refuses a seed while watermarking is on; they are mutually exclusive. */
@@ -606,6 +614,17 @@ export interface ImageRequest {
 export async function generateImages(request: ImageRequest): Promise<VertexImage[]> {
   const { account, model, prompt, count = 1, aspectRatio, imageSize, signal } = request;
   const spec = findVertexImageModel(model);
+  const references = request.referenceImages ?? [];
+  if (!Array.isArray(references) || references.length > (spec?.maxReferences ?? 0)) {
+    throw new VertexError("Too many reference images for this model.", false, 400);
+  }
+  for (const reference of references) {
+    if (!reference || typeof reference.base64 !== "string" || !reference.base64.length ||
+        !["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"].includes(reference.mimeType) ||
+        reference.base64.length > Math.ceil(7 * 1024 * 1024 / 3) * 4) {
+      throw new VertexError("Invalid reference image. Use an image under 7 MB.", false, 400);
+    }
+  }
   const wanted = Math.max(1, Math.min(spec?.maxImages ?? 4, count));
   const rate = imageRate(model);
   const location = locationOf(model);
@@ -631,7 +650,13 @@ export async function generateImages(request: ImageRequest): Promise<VertexImage
         () =>
           genai(account, location).models.generateContent({
             model,
-            contents: prompt,
+            contents: [{ role: "user", parts: [
+              ...references.flatMap((reference, index) => [
+                { text: reference.label || `Reference image ${index + 1}` },
+                { inlineData: { data: reference.base64, mimeType: reference.mimeType } },
+              ]),
+              { text: prompt },
+            ] }],
             config: {
               responseModalities: ["IMAGE"],
               ...(Object.keys(imageConfig).length ? { imageConfig } : {}),
@@ -668,6 +693,7 @@ export async function generateImages(request: ImageRequest): Promise<VertexImage
 }
 
 export interface VideoRequest {
+  requestId?: string;
   account: VertexAccount;
   model: string;
   prompt: string;
@@ -694,6 +720,15 @@ export interface VertexVideo {
   uri?: string;
   mimeType: string;
 }
+
+interface RememberedVideo {
+  started: Promise<GenerateVideosOperation>;
+  operation?: GenerateVideosOperation;
+  billed: boolean;
+  createdAt: number;
+}
+const videoOperations = ((globalThis as { __vertexVideoOperations?: Map<string, RememberedVideo> })
+  .__vertexVideoOperations ??= new Map<string, RememberedVideo>());
 
 /**
  * Video is a long-running operation, not a response.
@@ -728,13 +763,24 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
   }
 
   const seconds = durationSeconds ?? spec?.durations[0] ?? 8;
-  const rate = videoRate(model, generateAudio);
+  const rate = videoRate(model, generateAudio, resolution);
   // Veo bills per second of output, so the whole clip is the unit of spend —
   // this is the call that empties a credit balance, not the stills.
   // Held for the whole operation, not just the request: a Veo clip runs for
   // minutes, and without the hold every other clip started in that window would
   // check the cap against a total that ignores this one.
-  const releaseHold = guardSpend(account, rate.usd * seconds);
+  const operationKey = request.requestId ? createHash("sha256").update(JSON.stringify([
+    account.id, account.projectId, account.credentials, request.requestId, model, prompt, image,
+    aspectRatio, durationSeconds, resolution, generateAudio, outputGcsUri,
+  ])).digest("hex") : "";
+  // Keep a bounded window of completed responses for connection-loss retries.
+  for (const [key, cached] of videoOperations) {
+    if (cached.operation?.done && (Date.now() - cached.createdAt > 60 * 60 * 1000 || videoOperations.size > 16)) {
+      videoOperations.delete(key);
+    }
+  }
+  let remembered = operationKey ? videoOperations.get(operationKey) : undefined;
+  const releaseHold = remembered?.billed ? () => {} : guardSpend(account, rate.usd * seconds);
 
   let videos;
   try {
@@ -746,7 +792,8 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
 
     const location = locationOf(model);
 
-    let operation = await call(
+    if (!remembered) {
+      remembered = { billed: false, createdAt: Date.now(), started: call(
       account,
       model,
       "video",
@@ -759,7 +806,16 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
         }),
       signal,
       `Veo (${model})`
-    );
+      ) };
+      if (operationKey) videoOperations.set(operationKey, remembered);
+    }
+    let operation: GenerateVideosOperation;
+    try { operation = remembered.operation ?? await remembered.started; }
+    catch (error) {
+      if (operationKey) videoOperations.delete(operationKey);
+      throw error;
+    }
+    remembered.operation = operation;
 
     const deadline = Date.now() + VIDEO_TIMEOUT_MS;
 
@@ -772,15 +828,17 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
           false
         );
       }
-      await sleep(VIDEO_POLL_MS);
+      await sleep(VIDEO_POLL_MS, signal);
       try {
         operation = await genai(account, location).operations.getVideosOperation({ operation });
+        remembered.operation = operation;
       } catch (error) {
         throw classify(error);
       }
     }
 
     if (operation.error) {
+      if (operationKey) videoOperations.delete(operationKey);
       throw new VertexError(
         `Veo failed: ${operation.error.message ?? JSON.stringify(operation.error)}`,
         false
@@ -796,6 +854,7 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
       .filter((video) => video.base64 || video.uri);
 
     if (made.length === 0) {
+      if (operationKey) videoOperations.delete(operationKey);
       throw new VertexError("Veo finished but returned no video.", false);
     }
 
@@ -804,7 +863,10 @@ export async function generateVideo(request: VideoRequest): Promise<VertexVideo[
     releaseHold();
   }
 
-  noteSpend(account.id, model, "video", seconds * videos.length, rate);
+  if (!remembered?.billed) {
+    noteSpend(account.id, model, "video", seconds * videos.length, rate);
+    if (remembered) remembered.billed = true;
+  }
   return videos;
 }
 

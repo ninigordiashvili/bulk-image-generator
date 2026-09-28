@@ -9,12 +9,7 @@ export type JobResult =
   | {
       ok: false;
       error: string;
-      /**
-       * `false` means the failure is terminal — config, auth or tier problems
-       * that are identical on every attempt. The queue skips backoff entirely
-       * rather than burning the retry budget on a guaranteed failure. Absent or
-       * `true` retries as normal. A manual Retry still works either way.
-       */
+      /** Provider hint; every failed prompt still gets one automatic retry. */
       retryable?: boolean;
     };
 
@@ -64,7 +59,7 @@ export class GenerationQueue {
       retries: number;
       runJob: JobRunner;
     }
-  ) {}
+  ) { this.options.retries = 1; }
 
   on<K extends keyof QueueEventMap>(event: K, listener: Listener<K>): () => void {
     this.listeners[event].add(listener);
@@ -73,7 +68,7 @@ export class GenerationQueue {
     };
   }
 
-  private emit<K extends keyof QueueEventMap>(event: K, payload: QueueEventMap[K]) {
+  protected emit<K extends keyof QueueEventMap>(event: K, payload: QueueEventMap[K]) {
     for (const listener of this.listeners[event]) {
       (listener as Listener<K>)(payload);
     }
@@ -136,11 +131,10 @@ export class GenerationQueue {
   }
 
   /**
-   * Re-queues every failed and cancelled job. This is the counterpart to `halt`:
-   * once the underlying cause is fixed, one action resumes the whole batch
-   * instead of making the user click Retry on each of 150 rows.
+   * Re-queues failed and cancelled prompts; completed prompts stay untouched.
    */
   retryFailed() {
+    if (this.state === "cancelling") return;
     const retryable = [...this.jobs.values()].filter(
       (job) => job.status === "error" || job.status === "cancelled"
     );
@@ -168,7 +162,8 @@ export class GenerationQueue {
   retryJob(jobId: string) {
     const job = this.jobs.get(jobId);
     if (!job) return;
-    if (job.status === "generating" || job.status === "retrying") return;
+    if (job.status !== "error" && job.status !== "cancelled") return;
+    if (this.state === "cancelling") return;
     if (!this.controller || this.controller.signal.aborted) {
       this.controller = new AbortController();
     }
@@ -194,9 +189,6 @@ export class GenerationQueue {
     this.pump();
   }
 
-  setRetries(retries: number) {
-    this.options.retries = retries;
-  }
 
   private setState(state: QueueState) {
     if (this.state === state) return;
@@ -235,90 +227,39 @@ export class GenerationQueue {
   }
 
   private async run(jobId: string) {
-    const signal = this.controller!.signal;
+    const controller = this.controller!;
+    const signal = controller.signal;
     try {
       const job = this.jobs.get(jobId)!;
-      const result = await this.options.runJob(job, signal);
-
+      let result: JobResult;
+      try { result = await this.options.runJob(job, signal); }
+      catch (error) {
+        result = { ok: false, error: error instanceof Error ? error.message : "Unexpected error." };
+      }
+      if (controller !== this.controller) return;
       if (signal.aborted) {
         this.updateJob(jobId, { status: "cancelled", error: "Cancelled." });
-        return;
-      }
-
-      if (result.ok) {
-        this.updateJob(jobId, {
-          status: "success",
-          error: undefined,
-          resolutionMismatch: result.resolutionMismatch,
-        });
-        return;
-      }
-
-      const attempts = (this.jobs.get(jobId)?.attempts ?? 0) + 1;
-      if (result.retryable !== false && attempts <= this.options.retries) {
-        this.updateJob(jobId, {
-          status: "retrying",
-          attempts,
-          error: result.error,
-        });
-        // Linear backoff: 1.2s, 2.4s, 3.6s, ...
-        await delay(RETRY_BASE_DELAY_MS * attempts, signal);
-        if (signal.aborted) {
-          this.updateJob(jobId, { status: "cancelled", error: "Cancelled." });
-          return;
+      } else if (result.ok) {
+        this.updateJob(jobId, { status: "success", error: undefined, resolutionMismatch: result.resolutionMismatch });
+      } else if (job.attempts < this.options.retries) {
+        this.updateJob(jobId, { status: "retrying", attempts: 1, error: result.error });
+        await delay(RETRY_BASE_DELAY_MS, signal);
+        if (controller !== this.controller) return;
+        if (signal.aborted) this.updateJob(jobId, { status: "cancelled", error: "Cancelled." });
+        else {
+          this.updateJob(jobId, { status: "queued" });
+          this.pending.unshift(jobId);
         }
-        this.updateJob(jobId, { status: "queued" });
-        this.pending.unshift(jobId);
-        return;
+      } else {
+        this.updateJob(jobId, { status: "error", error: result.error, terminal: false });
       }
-
-      const terminal = result.retryable === false;
-      this.updateJob(jobId, {
-        status: "error",
-        attempts,
-        error: result.error,
-        terminal,
-      });
-
-      // Terminal failures are config, auth, billing or model-availability
-      // problems — every remaining job shares the same account and settings, so
-      // they would all fail the same way. Stop rather than grinding through them.
-      if (terminal) this.halt(result.error);
-    } catch (error) {
-      this.updateJob(jobId, {
-        status: "error",
-        error: error instanceof Error ? error.message : "Unexpected error.",
-      });
     } finally {
-      this.inFlight--;
-      this.emitProgress();
-      this.pump();
+      if (controller === this.controller) {
+        this.inFlight--;
+        this.emitProgress();
+        this.pump();
+      }
     }
-  }
-
-  /**
-   * Drops every queued job because the batch as a whole can't succeed. In-flight
-   * calls are left to finish — they're already paid for, and one of them may well
-   * come back with an image.
-   */
-  private halt(reason: string) {
-    if (this.haltReason) return;
-    this.haltReason = reason;
-
-    for (const jobId of this.pending) {
-      const job = this.jobs.get(jobId);
-      if (!job || job.status !== "queued") continue;
-      this.updateJob(jobId, {
-        status: "cancelled",
-        error:
-          "Stopped — an earlier job failed for a reason that affects the whole batch. Fix the cause, then Retry.",
-      });
-    }
-    this.pending = [];
-
-    this.emit("queue:halted", reason);
-    this.emitProgress();
-    this.settleIfDone();
   }
 
   getHaltReason(): string | null {

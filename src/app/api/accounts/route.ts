@@ -1,3 +1,4 @@
+import { removeAccount } from "@/server/removeAccount";
 import { NextResponse } from "next/server";
 import { AccountConfigError, keyHint, loadAccounts } from "@/server/accounts";
 import type { AccountsResponse } from "@/types";
@@ -23,5 +24,14 @@ export async function GET() {
         ? error.message
         : "Failed to read account config.";
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    await removeAccount("kie", new URL(request.url).searchParams.get("id") ?? "");
+    return Response.json({ ok: true });
+  } catch (error) {
+    return Response.json({ ok: false, error: error instanceof Error ? error.message : "Could not remove account." }, { status: 409 });
   }
 }

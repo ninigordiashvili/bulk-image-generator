@@ -31,10 +31,15 @@ export interface Resolution {
 
 /** Everything the render depends on that isn't the clip list itself. */
 export interface RenderSettings {
+  narrationTransitions?: boolean;
+  /** Independent opt-in zoom for videos whose names start with narration. */
+  narrationZoomAmount?: number;
   width: number;
   height: number;
   fps: number;
   encoder: Encoder;
+  /** Target video bitrate in kbps; zero keeps automatic quality. */
+  videoBitrateKbps: number;
   /**
    * Peak extra scale for a **still**, as a fraction: 0.08 = it ends 8% larger.
    * Named without a suffix because it predates the split and is what older
@@ -53,6 +58,9 @@ export interface RenderSettings {
 
   /** Old-film treatment: moving grain, flicker, vignette, faded curves. */
   film: FilmLook;
+  motionRanges?: MotionRange[];
+  filmRanges?: FilmRange[];
+  filmRangesEnabled?: boolean;
   /**
    * Which kinds the effects touch. Talking clips are excluded by default and
    * in practice always: a zoom on a speaking face reads as a mistake, and
@@ -75,6 +83,7 @@ export interface RenderSettings {
 
 /** One slot on the timeline. `file` is null for a black gap. */
 export interface RenderClip {
+  label?: string;
   file: string | null;
   kind: ClipKind;
   start: number;
@@ -90,7 +99,13 @@ export interface RenderClip {
 }
 
 /** How heavy the old-film treatment is. */
-export type FilmLook = "off" | "subtle" | "medium" | "heavy";
+export type FilmLook = "off" | "subtle" | "medium" | "heavy" | "monochrome" | "sepia" | "warm" | "cool" | "vignette";
+export type StillMotion = "pan" | "panZoom" | "drift";
+export type PanDirection = "left" | "right" | "up" | "down";
+export interface EffectRange { id: string; start: number; end: number }
+export interface MotionRange extends EffectRange { effect: StillMotion; direction: PanDirection; amount: number }
+export interface FilmRange extends EffectRange { look: FilmLook }
+
 
 export interface RenderRequest {
   clips: RenderClip[];
@@ -177,11 +192,16 @@ export const DEFAULT_SETTINGS: RenderSettings = {
   height: 1080,
   fps: 30,
   encoder: "libx264",
+  videoBitrateKbps: 0,
   zoomAmount: 0.08,
   zoomAmountMotion: 0.04,
+  narrationZoomAmount: 0,
   audioFadeOut: 1.5,
   fileName: "slideshow.mp4",
   film: "off",
+  motionRanges: [],
+  filmRanges: [],
+  filmRangesEnabled: false,
   effectsOnStills: true,
   effectsOnMotion: true,
   minVisualSeconds: 2,
@@ -197,10 +217,10 @@ export const VIDEO_EXTENSIONS = ["mp4", "mov", "m4v", "webm"] as const;
 import type { MomentStyle } from "@/lib/editor/textStyles";
 
 /** How a text moment arrives on screen. */
-export type MomentAnimation = "rise" | "fade" | "drop";
+export type MomentAnimation = "rise" | "fade" | "drop" | "gentle" | "stagger" | "count";
 
 /** The same list at runtime, for validating what a request claims. */
-export const MOMENT_ANIMATIONS: MomentAnimation[] = ["rise", "fade", "drop"];
+export const MOMENT_ANIMATIONS: MomentAnimation[] = ["rise", "fade", "drop", "gentle", "stagger", "count"];
 
 /**
  * A phrase shown over the picture at a given moment.

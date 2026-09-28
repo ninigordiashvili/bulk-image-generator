@@ -1,4 +1,5 @@
 "use client";
+import { HelpTip } from "./HelpTip";
 
 import {
   fieldLabel,
@@ -86,7 +87,7 @@ function ModelField({
           ))}
         </div>
         {field.description && (
-          <p className="mt-1.5 text-[11px] text-muted">{field.description}</p>
+          <HelpTip>{field.description}</HelpTip>
         )}
       </div>
     );
@@ -160,6 +161,19 @@ export function GenerationSettingsPanel({ disabled }: { disabled: boolean }) {
     <section className="panel space-y-4">
       <h2 className="panel-title mb-0">Generation settings</h2>
 
+      {settings.provider === "vertex" && settings.model === "gemini-3.1-flash-lite-image" && (
+        <div>
+          <label className="block text-xs text-muted">Image processing
+            <select className="field mt-1" disabled={disabled} value={settings.vertexImageMode ?? "standard"}
+              onChange={event => setSettings({ vertexImageMode: event.target.value as "standard" | "batch" })}>
+              <option value="standard">Standard — $0.0336 / 1K image</option>
+              <option value="batch">Batch — $0.0168 / 1K image, delayed results</option>
+            </select>
+          </label>
+          <HelpTip>Image-only output. Prompts and reference images add small input charges. Batch uses the selected Vertex project and its eligible Cloud credits. Google may queue work for up to 72 hours; follow progress in Activity.</HelpTip>
+        </div>
+      )}
+
       <div>
         <span className="mb-1.5 block text-xs text-muted">Model</span>
         <select
@@ -188,7 +202,7 @@ export function GenerationSettingsPanel({ disabled }: { disabled: boolean }) {
         </select>
 
         {spec && (
-          <p className="mt-1.5 text-[11px] text-muted">
+          <HelpTip>
             <code className="text-foreground">{spec.id}</code> · prompts up to{" "}
             {spec.promptMax.toLocaleString()} chars ·{" "}
             {refLimit > 0
@@ -203,7 +217,7 @@ export function GenerationSettingsPanel({ disabled }: { disabled: boolean }) {
             >
               docs
             </a>
-          </p>
+          </HelpTip>
         )}
       </div>
 
@@ -238,11 +252,11 @@ export function GenerationSettingsPanel({ disabled }: { disabled: boolean }) {
           {!customParse.ok ? (
             <p className="text-[11px] text-red-400">{customParse.error}</p>
           ) : (
-            <p className="text-[11px] text-muted">
+            <HelpTip>
               Merged into the task&apos;s <code>input</code> alongside{" "}
               <code>prompt</code>. Reference images are not attached — a custom
               model&apos;s image field name isn&apos;t known here.
-            </p>
+            </HelpTip>
           )}
         </div>
       ) : (
@@ -258,9 +272,9 @@ export function GenerationSettingsPanel({ disabled }: { disabled: boolean }) {
               />
             ))}
             {spec.options.length === 0 && (
-              <p className="text-[11px] text-muted">
+              <HelpTip>
                 This model takes a prompt and nothing else.
-              </p>
+              </HelpTip>
             )}
           </div>
         )
@@ -283,21 +297,14 @@ export function GenerationSettingsPanel({ disabled }: { disabled: boolean }) {
           disabled={false}
           onChange={(concurrency) => setQueueConfig({ concurrency })}
         />
-        <NumberField
-          label="Retries"
-          value={queueConfig.retries}
-          min={0}
-          max={5}
-          disabled={false}
-          onChange={(retries) => setQueueConfig({ retries })}
-        />
       </div>
 
-      <p className="text-[11px] text-muted">
-        Concurrency and retries apply live, mid-run. Model settings and
+      <HelpTip>
+        Concurrency applies live. Vertex quota errors wait and keep retrying until success or cancellation. Other failed prompts retry once automatically; after a
+        second failure, use Retry on that prompt. Model settings and
         images-per-prompt are locked while a batch is running. Every image spends
-        real kie.ai credits.
-      </p>
+        credits on the selected account.
+      </HelpTip>
     </section>
   );
 }

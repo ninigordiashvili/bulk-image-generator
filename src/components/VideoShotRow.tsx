@@ -1,4 +1,7 @@
 "use client";
+import { HeygenSettings } from "./HeygenSettings";
+import { heygenEstimate } from "@/lib/heygen";
+
 
 import Image from "next/image";
 import { useState } from "react";
@@ -46,66 +49,39 @@ export function VideoShotRow({
   const audioDriven = isAudioDriven(spec);
   const source = audioSources.find((entry) => entry.id === shot.audio?.sourceId);
   const status = job ? STATUS_META[job.status] : undefined;
-  const rate = creditsPerImage(shot.model, shotSize(shot), creditRates);
+  const rate = provider === "heygen" ? null : creditsPerImage(shot.model, shotSize(shot), creditRates);
+
+  const promptControls = (
+    <div className="flex items-start gap-2">
+      <textarea
+        aria-label="Motion prompt"
+        className="field h-16 flex-1 resize-y text-xs"
+        placeholder={audioDriven ? "Optional motion direction; the voice track drives the performance." : "Describe the motion and camera behavior for this scene."}
+        value={shot.prompt}
+        disabled={disabled || shot.model === "heygen:avatar_iii" || (shot.model === "heygen:avatar_iv" && shot.heygen?.source === "avatar" && !!shot.heygen.avatarType && shot.heygen.avatarType !== "photo_avatar")}
+        onChange={event => updateShot(shot.id, { prompt: event.target.value })}
+      />
+      <button type="button" className="btn-ghost text-xs" disabled={disabled || shotCount < 2 || !shot.prompt.trim()} onClick={() => applyPromptToAll(shot.prompt)} title="Give all rows this prompt">Apply prompt to all</button>
+    </div>
+  );
 
   return (
     <li className="flex gap-3 rounded-lg border border-line bg-surface-2 p-3">
       <div className="relative h-24 w-24 shrink-0 overflow-hidden rounded-md bg-black/40">
-        <Image
+        {shot.image ? <Image
           src={`data:${shot.image.mimeType};base64,${shot.image.base64}`}
           alt={shot.image.name}
           fill
           unoptimized
           className="object-cover"
-        />
+        /> : <span className="flex h-full items-center justify-center text-xs text-muted">{provider === "heygen" ? "HeyGen avatar" : "Text to video"}</span>}
         <span className="badge absolute top-1 left-1">{index + 1}</span>
       </div>
 
       <div className="min-w-0 flex-1 space-y-2">
-        <div className="flex items-start gap-2">
-          <textarea
-            className="field h-16 flex-1 resize-y text-xs"
-            placeholder={
-              audioDriven
-                ? `Optional direction for ${shot.image.name} — the voice track drives the performance.`
-                : `Describe the motion for ${shot.image.name} — what moves, and how the camera behaves.`
-            }
-            value={shot.prompt}
-            disabled={disabled}
-            onChange={(event) =>
-              updateShot(shot.id, { prompt: event.target.value })
-            }
-          />
-          <div className="flex shrink-0 flex-col gap-1">
-            <button
-              type="button"
-              className="rounded-md border border-line px-2 py-1 text-[11px] text-muted transition hover:border-red-500 hover:text-red-400 disabled:opacity-40"
-              disabled={disabled}
-              onClick={() => removeShot(shot.id)}
-              title="Remove this shot"
-            >
-              ✕
-            </button>
-            {/* Write the prompt once, push it everywhere — the same affordance
-                the voice tracks carry, and the tedious part of a ten-row batch
-                where every shot wants the same direction. */}
-            <button
-              type="button"
-              className="rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-muted transition hover:border-accent hover:text-accent disabled:opacity-40"
-              disabled={disabled || shotCount < 2 || !shot.prompt.trim()}
-              onClick={() => applyPromptToAll(shot.prompt)}
-              title={
-                shotCount < 2
-                  ? "Add another shot first"
-                  : `Give all ${shotCount} rows this prompt, replacing what they have`
-              }
-            >
-              → all
-            </button>
-          </div>
-        </div>
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <button type="button" className="btn-ghost text-xs" disabled={disabled} onClick={() => removeShot(shot.id)} title="Remove this shot" aria-label="Remove this shot">&#215;</button>
           <label className="flex items-center gap-1.5 text-[11px] text-muted">
             Model
             <select
@@ -248,6 +224,18 @@ export function VideoShotRow({
           )}
         </div>
 
+        {provider !== "heygen" && promptControls}
+
+        {provider === "heygen" && <>
+          <details className="rounded border border-line p-3">
+            <summary className="cursor-pointer text-xs text-muted">HeyGen Settings</summary>
+            <div className="mt-3 space-y-3">
+              {promptControls}
+          <HeygenSettings model={shot.model} resolution={shot.resolution} aspectRatio={shot.aspectRatio} options={shot.heygen} disabled={disabled} onChange={patch => updateShot(shot.id, patch)} />
+            </div>
+          </details>
+          <p className="text-xs text-muted">Selected audio: {(shot.audio?.duration ?? 0).toFixed(2)}s  -  Estimated &#36;{heygenEstimate(shot.audio?.duration ?? 0).toFixed(2)}</p>
+        </>}
         {job && status && (
           <div className="flex items-start gap-2 text-[11px]">
             <span className={status.className}>

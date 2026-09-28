@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { trackGalleryDownload } from "@/lib/downloadTracking";
 import { uniqueName } from "@/lib/download";
-import { formatCredits, formatSpend } from "@/lib/pricing";
+import { formatCredits, formatSpend, formatUsd } from "@/lib/pricing";
 import { useVideoStore } from "@/store/videoStore";
 import type { GeneratedVideo } from "@/types";
 
@@ -105,6 +106,7 @@ function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
     document.body.appendChild(link);
     link.click();
     link.remove();
+    void trackGalleryDownload("videos", video).catch(console.error);
   }
 
   return (
@@ -112,7 +114,7 @@ function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
       <div className="relative">
           <video
           src={url}
-          poster={`data:${video.posterMimeType};base64,${video.posterBase64}`}
+          poster={video.posterBase64 ? `data:${video.posterMimeType};base64,${video.posterBase64}` : undefined}
           controls
           preload="metadata"
           className="w-full bg-black"
@@ -141,7 +143,7 @@ function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
           <span className="badge">{video.duration}s</span>
           <span className="badge">{video.resolution}</span>
           <span className="badge">{formatSize(video.sizeBytes)}</span>
-          <span
+          {video.estimatedUsd !== undefined ? <span className="badge" title={video.model.startsWith("heygen:") ? "HeyGen estimate at $1/minute" : "Estimated Vertex cost with audio off"}>{formatUsd(video.estimatedUsd)} estimated</span> : <span
             className="badge"
             title={
               video.creditsEstimated
@@ -151,7 +153,7 @@ function VideoCard({ video, index }: { video: GeneratedVideo; index: number }) {
           >
             {video.creditsEstimated ? "≈" : ""}
             {formatCredits(video.credits)}
-          </span>
+          </span>}
         </div>
         <div className="flex gap-1">
           <button
@@ -193,6 +195,7 @@ export function VideoGallery() {
   const [busy, setBusy] = useState(false);
 
   const spent = videos.reduce((sum, video) => sum + video.credits, 0);
+  const vertexSpent = videos.reduce((sum, video) => sum + (video.estimatedUsd ?? 0), 0);
   // Veo clips carry an estimate rather than a billed figure, so the total is
   // marked approximate the moment one of them is in it.
   const anyEstimated = videos.some((video) => video.creditsEstimated);
@@ -201,22 +204,27 @@ export function VideoGallery() {
   async function downloadAll() {
     setBusy(true);
     try {
-      // Sequential, with a beat between each: ten simultaneous downloads trips
-      // Chrome's multiple-download block and most of them are silently dropped.
+      // One ZIP avoids the browser silently blocking later automatic downloads.
+      const { default: JSZip } = await import("jszip");
+      const zip = new JSZip();
       const used = new Set<string>();
       for (const [index, video] of videos.entries()) {
-        const url = URL.createObjectURL(video.blob);
         const name = uniqueName(fileNameFor(video, index), used);
         used.add(name);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = name;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        URL.revokeObjectURL(url);
+        zip.file(name, video.blob);
       }
+      const blob = await zip.generateAsync({ type: "blob", compression: "STORE" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `generated-videos-${videos.length}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      await Promise.all(videos.map(video => trackGalleryDownload("videos", video).catch(console.error)));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Could not prepare the ZIP. Please try again.");
     } finally {
       setBusy(false);
     }
@@ -229,7 +237,8 @@ export function VideoGallery() {
           <h2 className="panel-title mb-0">Video gallery</h2>
           <p className="mt-1 text-[11px] text-muted">
             {videos.length} clips · {anyEstimated ? "≈" : ""}
-            {formatSpend(spent)} {anyEstimated ? "(Veo cost estimated)" : "billed"}
+            {vertexSpent > 0 && <>{formatUsd(vertexSpent)} estimated{spent > 0 ? " + " : ""}</>}
+            {(spent > 0 || vertexSpent === 0) && <>{formatSpend(spent)} {anyEstimated ? "(Veo cost estimated)" : "billed"}</>}
             {totalBytes > 0 && <> · {formatSize(totalBytes)} stored locally</>}
           </p>
         </div>
@@ -240,7 +249,7 @@ export function VideoGallery() {
             disabled={videos.length === 0 || busy}
             onClick={() => void downloadAll()}
           >
-            {busy ? "Downloading…" : "Download all"}
+            {busy ? "Downloading…" : "Download all (ZIP)"}
           </button>
           <button
             type="button"
@@ -261,8 +270,7 @@ export function VideoGallery() {
         <p className="py-8 text-center text-xs text-muted">Loading gallery…</p>
       ) : videos.length === 0 ? (
         <p className="py-8 text-center text-xs text-muted">
-          No clips yet. Generated videos are downloaded from kie and stored in your
-          browser, so they outlive the ~24h expiry on kie&apos;s links.
+          No videos yet.
         </p>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">

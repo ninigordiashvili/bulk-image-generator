@@ -35,6 +35,32 @@ several kie.ai accounts; the account picker switches between them and shows each
 one's live credit balance. If you'd rather not keep a file, `KIE_API_KEY` in
 `.env.local` works as a fallback.
 
+### Vertex AI accounts
+
+Vertex accounts use Google Cloud credentials and are configured in
+`vertex-accounts.json`. The account picker can add an account's metadata from the
+browser, but the credential JSON must already be on the server; enter `adc` for
+Application Default Credentials or a local path such as `./vertex-new-key.json`.
+Each account needs its Google Cloud `projectId`:
+
+```json
+[
+  {
+    "id": "main",
+    "label": "Vertex — main",
+    "projectId": "my-google-project",
+    "location": "us-central1",
+    "credentials": "./vertex-main-key.json",
+    "creditUsd": 300
+  }
+]
+```
+
+The displayed Vertex balance is an estimate: it subtracts successful generations
+recorded in `.local/vertex-usage.jsonl` from `creditUsd`. Google Cloud does not
+provide a prepaid balance API here, so earlier usage, other charges, pending jobs,
+and credit expiry are not included.
+
 ```bash
 npm run dev     # http://localhost:3000
 ```
@@ -135,8 +161,9 @@ consistent look across a long run.
 **Persistence split.** Settings, character library, style bible, queue config,
 prompt text and learned credit rates persist to `localStorage`. The generated
 gallery goes to **IndexedDB** (base64 images are far too large for localStorage),
-so it survives a refresh; live `jobs`/`progress`/`queueState` are in-memory and
-reset on reload, by design. "Clear gallery" wipes IndexedDB.
+so it survives a refresh. The generator panels observe server-owned batches;
+after a refresh, **Activity** reopens their progress and saved results from any
+browser. "Clear gallery" wipes that browser's IndexedDB, not the server's results.
 
 ## Videos
 
@@ -161,12 +188,12 @@ bodies (`imageUrls` vs `input.image_urls`), different completion signals
 settings when you switch its model — Veo can't do 30s, Grok can't do 1080p.
 
 **Start, then poll — never one long request.** `POST /api/kie/video/start`
-creates the task and returns its id immediately; the browser polls
-`GET /api/kie/video/status`. A Veo render has been observed taking over sixteen
+creates the task and returns its id immediately; the background worker polls
+the same status handler. A Veo render has been observed taking over sixteen
 minutes, and an HTTP request held open that long dies to any timeout in between,
 losing a task that has already been billed.
 
-**Retrying resumes; it does not re-pay.** A row keeps its `taskId`, so retrying
+**Retrying resumes; it does not re-pay.** The server saves each accepted kie task ID, so retrying
 after a dropped connection or a transient error waits on the render already in
 flight. The id is cleared only when the render genuinely failed, or when you
 change the prompt or settings — at which point the old task is the wrong clip
@@ -302,14 +329,29 @@ from the absolute cue, not accumulated clip by clip — sizing each clip from it
 own duration would drift several frames off the narration by the hundredth
 image.
 
-**How the render works.** Each clip is encoded on its own to an MPEG-TS segment,
-a few at a time across the cores; the final pass concatenates them by *copying*
-the streams and muxes the audio in, so ten minutes of video is only ever encoded
-once. Every segment uses identical codec settings, which is what makes the copy
-safe. Measured on a 10-core M-series: **10 minutes of 1080p30 with zoom, from
-100 images, in about two minutes** — five times faster than realtime. Worker
-count is flat between 4 and 9 on that machine; the zoom filter, not the
-scheduler, is the limit.
+**How the render works.** Each clip is encoded on its own to an MPEG-TS segment;
+the final pass concatenates them by *copying* the streams and muxes the audio in.
+Every segment uses identical codec settings, which is what makes the copy safe.
+The renderer automatically runs up to four clips at once, reserving CPU and
+memory for the editor. Each encoder/filter stage keeps its two-thread limit.
+`EDITOR_RENDER_WORKERS=1` through `8` overrides the worker target (still subject
+to the memory limit); restart the server after changing environment settings.
+Smooth motion interpolation, zoom quality and film effects are unchanged.
+
+**Repeat exports reuse finished clips**, including across the new sessions
+created by the Export button. Cache keys include media content hashes and the
+exact FFmpeg instructions, so renamed identical uploads can be reused. Caption
+and overlay changes invalidate only affected segments; audio-only edits reuse
+the video and rerun the final mux. Only successful segment encodes enter the
+cache, so cancellation can preserve completed work without reusing partial files.
+The shared cache lives in `bulk-generator-segment-cache` under the OS temp
+directory (`EDITOR_CACHE_DIR` can override it). At export boundaries it evicts
+entries only after every export using them has passed its 48-hour download window. Job cleanup does not
+remove this shared cache.
+
+Run `node scripts/check-editor-render.cjs` for actual FFmpeg and cache checks.
+Set `CHECK_RENDER_BENCHMARK=1` to also compare two/four workers and cached exports
+on a short 1080p sample with smooth slow motion, zoom, film and captions.
 
 ffmpeg is not a system dependency — `ffmpeg-static` and `ffprobe-static` ship the
 binaries, and `serverExternalPackages` in `next.config.ts` keeps them out of the
@@ -332,7 +374,7 @@ would arrive as a fragment with no error. Chunking stays well under the limit an
 gives the progress bar real bytes to report.
 
 Uploads, intermediates and the finished file live in a job directory under the OS
-temp dir, swept after six hours. Nothing is written into the repo, and the editor
+temp dir, removed 48 hours after a recorded download. Nothing is written into the repo, and the editor
 holds no state the generator can see.
 
 | Control | Default | Notes |
@@ -536,6 +578,8 @@ $0.04). Credits are the real unit — check <https://kie.ai> for billed truth.
   second time. Over localhost that's seconds; over the LAN it isn't.
 - **The editor's timeline lives in the tab.** Settings persist to `localStorage`,
   but the files themselves can't — reloading means picking the folder again.
+  An already submitted export continues and can be viewed/downloaded in Activity;
+  reselecting the folder is only needed to edit the timeline or start a different export.
 - **Cuts are hard cuts.** No cross-fades, and no per-clip effect overrides; the
   motion and film settings apply per kind, not per clip.
 - **The preview's film look is an approximation.** Calibrated to the render's
@@ -564,3 +608,119 @@ $0.04). Credits are the real unit — check <https://kie.ai> for billed truth.
   name, so the extra variants are saved as `0-00 (2).png` and are not placed on
   the timeline — pick the one you want and rename it. Cues are designed for the
   one-image-per-prompt case.
+
+
+## Background generation and Activity
+
+Image and video batches are uploaded as immutable job inputs in 2 MiB chunks to
+/api/work, then started with an idempotent request. The local Node server owns
+concurrency, retries, provider polling and result downloads. Closing, minimizing
+or refreshing the submitting browser does not cancel accepted work. Only the
+explicit Cancel action aborts its controller and stops queued submissions.
+Keep the page open until the inputs finish saving; a closed browser cannot send
+files that have not reached the server yet. Existing browser-managed batches from
+before this update cannot be migrated mid-flight.
+
+The Activity link is always visible and lists batches across browsers/accounts,
+plus video editor exports that outlive their original tab. Each batch has a stable
+URL, elapsed time, an approximate remaining time and estimated finish after the
+first completed item. Estimates use observed throughput, including quota waits,
+and vary with provider load and mixed models. Activity offers saved media previews,
+downloads, cancellation and retry of failed/cancelled generation jobs. The video
+export endpoint rejects downloads until its phase is done.
+
+Background generation needs a long-running local Node server, not serverless
+hosting. The server machine must stay awake. Status, accepted kie task IDs, inputs
+and generated files are stored under the OS temp directory bulk-generator-work
+(or WORK_ROOT). Completed generation results remain readable after a server
+restart; uncertain in-flight work is marked interrupted and is never automatically
+resubmitted, to avoid duplicate charges. Browser closure is fully supported;
+server shutdown/power loss is a separate interruption. Render recovery uses the
+existing server job registry and download-based 48-hour retention. EDITOR_WORK_ROOT
+isolates render workspaces for testing.
+
+## Voice volume control
+
+The sound editor now has an opt-in Even out volume checkbox. It smooths gain
+with FFmpeg dynaudnorm and limits peaks, after the existing pause-cut decisions.
+It adds no gate, EQ, pitch shift or time stretching. Gain is bounded to avoid
+excessive noise amplification. To preserve every original sample interval,
+turn off Shorten long pauses: volume-only joining then keeps the entire recording.
+Both choices persist across browser refreshes. Listen to your own voiceovers with
+leveling on/off; subjective naturalness varies with noise and recording dynamics.
+
+Checks: node scripts/check-background-work.cjs (server lifecycle/cancellation,
+concurrent accounts, duplicate requests, persistence and ETA),
+node scripts/check-work-provider.cjs (provider task reuse),
+node scripts/check-generation.cjs (real stores, provider adapters and quota/retry
+behavior with mocked providers), node scripts/check-editor-render.cjs (real FFmpeg
+exports/cache) and node scripts/check-audio-leveling.cjs (real audio processing).
+No billed generations are used by these tests.
+
+The optional check-background-ui.cjs runs against an isolated production server
+on 127.0.0.1:3001 using playwright-core and installed Chrome. Set PLAYWRIGHT_MODULE
+to its module path, APP_PASSWORD=background-ui-test, and separate WORK_ROOT,
+EDITOR_WORK_ROOT and EDITOR_CACHE_DIR directories. It tests browser closure,
+recovery in another browser, control persistence and an actual playable FFmpeg
+export. It only submits a nonexistent provider account, so no credits are spent.
+
+## HeyGen talking-avatar batches
+
+Choose **Videos → Video account → HeyGen**. Set Avatar III, IV, or V in
+the batch defaults, then add images or rows using a saved/stock HeyGen avatar.
+Add a voice track, assign it to rows, and click each row's audio cut to select
+its start and length. Generate submits the full batch to background Activity.
+Rows may use different engines, audio segments, resolutions, and aspect ratios.
+
+- The server reads `HEYGEN_API_KEY`, or `apiKey` from the gitignored
+  `.local/heygen.json`. Account APIs return balance and avatar information only.
+- Auto aspect ratio passes HeyGen's `auto` setting; explicit format choices
+  override it. Avatar III photo output is limited to 1080p. Unsupported engine
+  options are omitted, and saved-avatar engine support is checked before generation.
+- Direct image animation uses Avatar IV. Photo Avatar mode creates and caches
+  an avatar per image; HeyGen may bill this creation separately. Saved-avatar
+  mode supports private or stock photo/video avatars and all their listed engines.
+- Estimates use the configured assumption **$1 per generated minute**, for every
+  engine and quality. This is not a quote of the provider's actual billing rate.
+- Audio is cut to PCM samples and sent as WAV. Uploads must fit HeyGen's 32 MB
+  limit. Finished files retain the selected audio duration; video duration is
+  accurate to the output frame grid. Extra frames are trimmed or missing tail
+  frames held without stretching the audio. Matching video is copied losslessly;
+  duration repairs use a high-quality, single-thread encode.
+- Accepted video IDs, upload IDs, and avatar IDs are checkpointed. Network
+  retries reuse idempotency keys; download retries refresh the existing video's
+  URL. Confirmed generation failures can be retried explicitly. Uncertain
+  submissions are blocked after the provider's safe idempotency window expires.
+
+Checks: `node scripts/check-heygen.cjs`, `node scripts/check-heygen-media.cjs`,
+and `node scripts/check-heygen-ui.cjs` (local app, Chrome and playwright-core).
+These checks use mocked API responses and tiny local media; they do not submit
+paid provider generations. A real character/audio sample is needed to assess
+HeyGen's visual lip-sync quality.
+
+
+### Saved-file cleanup
+
+The app records download handoffs from galleries/ZIPs and completed full file transfers
+from Activity or the editor. Preview requests and partial/aborted transfers do not
+start the cleanup clock. Browsers cannot verify that a user actually saved a download
+to disk; cancelling the save dialog after the handoff cannot be detected.
+
+Downloaded browser gallery copies and completed server exports expire 48 hours after
+the first recorded download. A settled generation batch is removed only when every
+saved result has reached that threshold. Undownloaded/historical results with no
+receipt remain; previous downloads are not guessed. Downloads already on your computer,
+settings and reference images are not removed.
+
+Activity starts a once-per-minute server cleanup timer (no browser needs to remain
+open afterward). It catches up after the next Activity request following a server
+restart. Cleanup pauses during active exports, and active generation batches are
+protected. Browser cleanup runs on opening the site, focus and once per minute while
+it is open. Closed browsers catch up next visit. Small persistent download receipts
+in `bulk-generator-download-history` allow other browsers to reconcile their gallery
+copies even after server payload deletion; `DOWNLOAD_RECEIPTS_ROOT` overrides this path.
+
+Reusable render segments expire after every export using them has passed its 48-hour
+download window. Legacy segments without ownership metadata are retained until
+reused/tracked or manually cleared. Undownloaded results can therefore occupy more
+than the former 4 GiB cache cap. No encoding or quality settings change.

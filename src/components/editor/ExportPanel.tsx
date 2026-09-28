@@ -58,6 +58,7 @@ export function ExportPanel({
       <p className="text-xs text-muted">
         {clipCount} clips · {formatDuration(total)} · {settings.width}×
         {settings.height} · {settings.fps} fps · H.264 MP4
+        {settings.videoBitrateKbps > 0 && ` (${settings.videoBitrateKbps.toLocaleString()} kbps target)`}
       </p>
 
       {busy ? (
@@ -102,7 +103,7 @@ export function ExportPanel({
           </button>
           <p className="text-[11px] text-muted">
             Rendered in {Math.round((state.status?.elapsedMs ?? 0) / 1000)}s. The
-            file stays on the server for six hours — download it before then.
+            file is kept until you download it, then automatically deleted after 48 hours.
           </p>
         </>
       ) : (

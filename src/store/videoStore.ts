@@ -9,6 +9,8 @@ import {
   putVideo,
 } from "@/lib/galleryDb";
 import { insertVideos } from "@/lib/galleryOrder";
+import { pendingVideoShots } from "@/lib/videoPrompts";
+import { videoRate } from "@/lib/vertexPricing";
 import {
   CUT_BUDGET_BYTES,
   decodeTrack,
@@ -27,14 +29,10 @@ import {
   videoModel,
   defaultVideoModelFor,
 } from "@/lib/videoModels";
-import { GenerationQueue } from "@/services/GenerationQueue";
-import type { Provider } from "@/types";
-import {
-  downloadVideoBlob,
-  generateVideoOnVertex,
-  pollVideo,
-  startVideo,
-} from "@/services/kieApi";
+import { BackgroundQueue, newBatchId } from "@/services/BackgroundQueue";
+import type { WorkStatus } from "@/types/work";
+import { heygenEstimate, heygenSource, type HeygenOptions } from "@/lib/heygen";
+import type { VideoProvider } from "@/types";
 import { useGenerationStore } from "@/store/generationStore";
 import {
   MAX_SHOTS,
@@ -72,11 +70,13 @@ export interface AudioSource {
  */
 function shotTag(shot: {
   prompt: string;
-  image: { name: string };
+  tag?: string;
+  image?: { name: string };
   audio?: ShotAudio;
 }): string | undefined {
   const fromPrompt = cueTagIn(shot.prompt);
   if (fromPrompt) return fromPrompt;
+  if (shot.tag) return sanitizeCueTag(shot.tag) ?? undefined;
 
   // A talking clip is defined by its voice track, so it takes that track's name
   // plus where in it the cut was taken: narration_1-35.mp4 from 1:35 of
@@ -87,7 +87,7 @@ function shotTag(shot: {
     return `${stem}_${secondsToCue(shot.audio.start)}`;
   }
 
-  if (parseTimestamp(shot.image.name) === null) return undefined;
+  if (!shot.image || parseTimestamp(shot.image.name) === null) return undefined;
   return sanitizeCueTag(shot.image.name) ?? undefined;
 }
 
@@ -107,18 +107,22 @@ function shotTag(shot: {
 export function shotSize(shot: VideoShot): { duration: number; resolution: string } {
   if (isAudioDriven(videoModel(shot.model))) {
     return {
-      duration: Math.round((shot.audio?.duration ?? 0) * 10) / 10,
-      resolution: "avatar",
+      duration: shot.audio?.duration ?? 0,
+      resolution: videoModel(shot.model).provider === "heygen" ? shot.resolution : "avatar",
     };
   }
   return { duration: shot.duration, resolution: shot.resolution };
 }
 
 export function isRunnable(shot: VideoShot): boolean {
+  const spec = videoModel(shot.model);
+  if (spec.provider === "heygen" && heygenSource(shot.model, shot.heygen) === "avatar") {
+    if (!shot.heygen?.avatarId?.trim()) return false;
+  } else if (!shot.image && spec.provider !== "vertex") return false;
   if (isAudioDriven(videoModel(shot.model))) {
-    return Boolean(shot.audio && shot.audio.duration > 0);
+    return Boolean(shot.audio && shot.audio.duration > 0 && shot.audio.duration <= (spec.maxAudioSeconds ?? 300));
   }
-  return shot.prompt.trim().length > 0;
+  return stripCueLines(shot.prompt).length > 0;
 }
 
 const EMPTY_PROGRESS: QueueProgress = {
@@ -131,6 +135,7 @@ const EMPTY_PROGRESS: QueueProgress = {
 
 /** Everything a row needs except the image, so "apply to all" has one shape. */
 export interface ShotSettings {
+  heygen?: HeygenOptions;
   model: string;
   duration: number;
   resolution: string;
@@ -139,6 +144,10 @@ export interface ShotSettings {
 
 interface VideoStore {
   shots: VideoShot[];
+  inputMode: "text" | "images";
+  promptText: string;
+  setInputMode: (mode: "text" | "images") => void;
+  setPromptText: (text: string) => void;
   /** Defaults applied to newly added rows. */
   defaults: ShotSettings;
   concurrency: number;
@@ -152,12 +161,14 @@ interface VideoStore {
   videos: GeneratedVideo[];
   galleryHydrated: boolean;
 
+  backgroundStatus: WorkStatus | null;
   jobs: GenerationJob[];
   progress: QueueProgress;
   queueState: QueueState;
   haltReason: string | null;
 
   addShots: (images: ShotImage[]) => void;
+  addAvatarShots: (count: number) => void;
   updateShot: (id: string, patch: Partial<VideoShot>) => void;
   removeShot: (id: string) => void;
   clearShots: () => void;
@@ -183,9 +194,9 @@ interface VideoStore {
    * two used to share one, so picking kie.ai for a video batch also moved the
    * image tab — and any image batch running on it — onto that account.
    */
-  provider: Provider;
+  provider: VideoProvider;
   accountId: string;
-  setAccount: (patch: { provider?: Provider; accountId?: string }) => void;
+  setAccount: (patch: { provider?: VideoProvider; accountId?: string }) => void;
 
   startGeneration: () => void;
   cancelGeneration: () => void;
@@ -196,97 +207,35 @@ interface VideoStore {
   clearGallery: () => Promise<void>;
 }
 
-let queue: GenerationQueue | null = null;
+let queue: BackgroundQueue | null = null;
 let shotCounter = 0;
 
-const POLL_INTERVAL_MS = 12_000;
-/** Veo has been observed rendering for over 15 minutes; this is deliberately generous. */
-const POLL_DEADLINE_MS = 45 * 60 * 1000;
-/**
- * kie's gateway intermittently answers a status read with a 502 while the task
- * is still rendering. The task is already billed, so a blip must not abandon it.
- */
-const MAX_CONSECUTIVE_POLL_ERRORS = 12;
-
-type SettledVideo =
-  | { ok: true; videoUrl: string; credits: number; actualResolution?: string }
-  | { ok: false; error: string; retryable?: boolean };
-
-/**
- * Waits for a task to finish, absorbing transient read failures. Only a
- * genuinely terminal answer (the render failed, the key is bad) or a long run
- * of consecutive failures gives up.
- */
-async function awaitVideo(
-  accountId: string,
-  taskId: string,
-  model: string,
-  signal: AbortSignal
-): Promise<SettledVideo> {
-  const deadline = Date.now() + POLL_DEADLINE_MS;
-  let consecutiveErrors = 0;
-
-  for (;;) {
-    if (signal.aborted) return { ok: false, error: "Cancelled.", retryable: false };
-    await sleep(POLL_INTERVAL_MS, signal);
-    if (signal.aborted) return { ok: false, error: "Cancelled.", retryable: false };
-
-    const status = await pollVideo(accountId, taskId, model, signal);
-
-    if (status.ok && status.state === "done") {
-      return {
-        ok: true,
-        videoUrl: status.videoUrl,
-        credits: status.credits,
-        actualResolution: status.actualResolution,
-      };
-    }
-    if (status.ok) {
-      consecutiveErrors = 0;
-    } else {
-      if (status.retryable === false) return status;
-      consecutiveErrors++;
-      if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) return status;
-    }
-
-    if (Date.now() > deadline) {
-      return {
-        ok: false,
-        error: `Task ${taskId} was still rendering after ${Math.round(
-          POLL_DEADLINE_MS / 60000
-        )} minutes. It may yet finish — Retry resumes waiting on the same task rather than paying for a new one.`,
-        retryable: true,
-      };
-    }
-  }
-}
-
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(finish, ms);
-    signal.addEventListener("abort", finish, { once: true });
-    function finish() {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", finish);
-      resolve();
-    }
-  });
-}
-
-/**
- * Forces a row's settings to something its model actually accepts. Switching a
- * row from Grok to Veo has to bring 30s down to 8s and 480p up to 720p — kie
- * rejects the mismatch outright, and a rejected batch is a wasted one.
- */
 function reconcileShot(shot: VideoShot): VideoShot {
   const spec = videoModel(shot.model);
+  if (spec.provider === "heygen") {
+    let heygen = shot.heygen;
+    if (spec.requestModel !== "avatar_iv" && heygen?.source === "image") heygen = { ...heygen, source: "photo" };
+    const photo = heygenSource(spec.id, heygen) !== "avatar" || heygen?.avatarType === "photo_avatar";
+    const settings = clampToModel(spec, shot);
+    if (spec.requestModel === "avatar_iii" && photo && settings.resolution === "4k") settings.resolution = "1080p";
+    return { ...shot, heygen, ...settings };
+  }
   return { ...shot, model: spec.id, ...clampToModel(spec, shot) };
+}
+
+function reconcileDefaults(settings: ShotSettings): ShotSettings {
+  const { model, duration, resolution, aspectRatio, heygen } = reconcileShot({ ...settings, id: "defaults", prompt: "" });
+  return { model, duration, resolution, aspectRatio, ...(heygen ? { heygen } : {}) };
 }
 
 export const useVideoStore = create<VideoStore>()(
   persist(
     (set, get) => ({
       shots: [],
+      inputMode: "text",
+      promptText: "",
+      setInputMode: (inputMode) => set({ inputMode }),
+      setPromptText: (promptText) => set({ promptText }),
       defaults: {
         model: DEFAULT_VIDEO_MODEL,
         duration: videoModel(DEFAULT_VIDEO_MODEL).defaultDuration,
@@ -305,6 +254,7 @@ export const useVideoStore = create<VideoStore>()(
       videos: [],
       galleryHydrated: false,
 
+      backgroundStatus: null,
       jobs: [],
       progress: EMPTY_PROGRESS,
       queueState: "idle",
@@ -327,13 +277,16 @@ export const useVideoStore = create<VideoStore>()(
         });
       },
 
+      addAvatarShots: (count) => set(state => ({ shots: [...state.shots, ...Array.from({ length: Math.min(MAX_SHOTS - state.shots.length, Math.max(0, Math.floor(count))) }, () => reconcileShot({
+        ...state.defaults, heygen: { ...state.defaults.heygen, source: "avatar" }, id: "shot-" + Date.now() + "-" + shotCounter++, prompt: "",
+      }))] })),
       updateShot: (id, patch) => {
         // Changing what to render invalidates any task already running for this
         // row — resuming it would return a clip of the *old* settings. Editing
         // only the prompt text does the same, since the prompt is the render.
         const invalidates =
           patch.taskId === undefined &&
-          ["model", "duration", "resolution", "aspectRatio", "prompt"].some(
+          ["model", "duration", "resolution", "aspectRatio", "prompt", "heygen"].some(
             (field) => field in patch
           );
         set((state) => ({
@@ -342,6 +295,7 @@ export const useVideoStore = create<VideoStore>()(
               ? reconcileShot({
                   ...shot,
                   ...patch,
+                  ...(patch.model?.startsWith("heygen:") && !shot.model.startsWith("heygen:") ? { aspectRatio: "auto", resolution: "1080p" } : {}),
                   ...(invalidates ? { taskId: undefined } : {}),
                 })
               : shot
@@ -437,8 +391,8 @@ export const useVideoStore = create<VideoStore>()(
 
       applyToAll: (settings) => {
         set((state) => ({
-          shots: state.shots.map((shot) => reconcileShot({ ...shot, ...settings })),
-          defaults: { ...state.defaults, ...settings },
+          shots: state.shots.map((shot) => reconcileShot({ ...shot, ...settings, ...(settings.model?.startsWith("heygen:") && !shot.model.startsWith("heygen:") ? { aspectRatio: "auto", resolution: "1080p" } : {}) })),
+          defaults: reconcileDefaults({ ...state.defaults, ...settings }),
         }));
       },
 
@@ -456,7 +410,10 @@ export const useVideoStore = create<VideoStore>()(
       },
 
       setDefaults: (patch) => {
-        set((state) => ({ defaults: { ...state.defaults, ...patch } }));
+        set((state) => {
+          const defaults = { ...state.defaults, ...patch };
+          return { defaults: reconcileDefaults(defaults) };
+        });
       },
 
       setAccount: (patch) =>
@@ -471,7 +428,7 @@ export const useVideoStore = create<VideoStore>()(
           return {
             provider,
             accountId: patch.accountId ?? state.accountId,
-            defaults: { ...state.defaults, model },
+            defaults: reconcileDefaults({ ...state.defaults, model, ...(provider === "heygen" && state.provider !== "heygen" ? { aspectRatio: "auto", resolution: "1080p" } : {}) }),
           };
         }),
 
@@ -480,10 +437,7 @@ export const useVideoStore = create<VideoStore>()(
         queue?.setConcurrency(concurrency);
       },
 
-      setRetries: (retries) => {
-        set({ retries });
-        queue?.setRetries(retries);
-      },
+      setRetries: () => set({ retries: 1 }),
 
       hydrateGallery: async () => {
         if (get().galleryHydrated) return;
@@ -492,7 +446,13 @@ export const useVideoStore = create<VideoStore>()(
       },
 
       startGeneration: () => {
-        const { shots, concurrency, retries } = get();
+        if (["running", "cancelling"].includes(get().queueState)) return;
+        const { concurrency } = get();
+        const shots = pendingVideoShots(get());
+        if (shots.length > MAX_SHOTS) {
+          set({ haltReason: `Use at most ${MAX_SHOTS} prompts per video batch. No videos were submitted.` });
+          return;
+        }
 
         /**
          * The account this run bills, frozen at the moment it starts.
@@ -503,13 +463,17 @@ export const useVideoStore = create<VideoStore>()(
          * place. The account is picked once, here, and the run keeps it.
          */
         const billing = { provider: get().provider, accountId: get().accountId };
+        if (!billing.accountId || shots.some(shot => videoModel(shot.model).provider !== billing.provider)) {
+          set({ haltReason: "Select an account and a matching video model before starting." });
+          return;
+        }
         const runnable = shots.filter(isRunnable);
         if (runnable.length === 0) return;
 
         // Identifies this run so its clips stay grouped and in shot order,
         // however long individual renders take to come back.
         const batchCreatedAt = Date.now();
-        const batchId = `batch-${batchCreatedAt}`;
+        const batchId = `batch-${newBatchId()}`;
 
         const jobs: GenerationJob[] = runnable.map((shot, index) => ({
           id: shot.id,
@@ -523,260 +487,51 @@ export const useVideoStore = create<VideoStore>()(
           attempts: 0,
         }));
 
-        queue = new GenerationQueue({
-          concurrency,
-          retries,
-          runJob: async (job, signal) => {
-            const shot = get().shots.find((candidate) => candidate.id === job.id);
-            if (!shot) {
-              return { ok: false, error: "Shot was removed.", retryable: false };
-            }
-            // Taken from the snapshot above, never re-read: see `billing`.
-            const accountId = billing.accountId;
-            if (!accountId) {
-              return { ok: false, error: "No account selected.", retryable: false };
-            }
-
+        queue = new BackgroundQueue({
+          kind: "video", accountId: billing.accountId, concurrency,
+          onStatus: (backgroundStatus) => set({ backgroundStatus }),
+          prepare: async (job) => {
+            const shot = runnable.find(candidate => candidate.id === job.id)!;
             const spec = videoModel(shot.model);
-            const provider = billing.provider;
-
-            if (spec.provider !== provider) {
-              return {
-                ok: false,
-                error: `${spec.label} needs a ${spec.provider} account, but a ${provider} one is selected.`,
-                retryable: false,
-              };
-            }
-
-            // Vertex has no task id to resume from: the server waits the whole
-            // operation out and hands back bytes. That means an interrupted
-            // attempt cannot be rejoined — the clip still finishes and is still
-            // billed, so this path is marked non-retryable on failure rather
-            // than silently paying for a second render.
-            if (spec.api === "vertex") {
-              const made = await generateVideoOnVertex(
-                {
-                  accountId,
-                  model: spec.requestModel,
-                  prompt: stripCueLines(shot.prompt),
-                  image: {
-                    base64: shot.image.base64,
-                    mimeType: shot.image.mimeType,
-                  },
-                  durationSeconds: shot.duration,
-                  resolution: shot.resolution,
-                  aspectRatio: shot.aspectRatio,
-                  // The editor lays the user's own narration under every clip,
-                  // so a generated soundtrack would only be stripped later —
-                  // and silent is the cheaper rate.
-                  generateAudio: false,
-                },
-                { signal }
-              );
-              if (!made.ok) {
-                return { ok: false, error: made.error, retryable: made.retryable };
-              }
-
-              const blob = made.base64
-                ? new Blob([Uint8Array.from(atob(made.base64), (c) => c.charCodeAt(0))], {
-                    type: made.mimeType,
-                  })
-                : null;
-              if (!blob) {
-                return {
-                  ok: false,
-                  error:
-                    "Vertex wrote the clip to Cloud Storage instead of returning " +
-                    "bytes. Clear outputGcsUri to get it inline.",
-                  retryable: false,
-                };
-              }
-
-              const video: GeneratedVideo = {
-                id: `${shot.id}@${Date.now()}`,
-                shotId: shot.id,
-                prompt: stripCueLines(shot.prompt),
-                tag: shotTag(shot),
-                model: shot.model,
-                modelLabel: spec.label,
-                mimeType: blob.type || "video/mp4",
-                blob,
-                sizeBytes: blob.size,
-                duration: shot.duration,
-                resolution: shot.resolution,
-                aspectRatio: shot.aspectRatio,
-                posterBase64: shot.image.base64,
-                posterMimeType: shot.image.mimeType,
-                batchId,
-                batchCreatedAt,
-                promptIndex: job.promptIndex,
-                createdAt: Date.now(),
-                // Vertex bills Google Cloud, not a kie credit balance. Zero here
-                // means "not a kie cost", not "free" — the dollar figure lives
-                // at /api/vertex/usage.
-                credits: 0,
-                creditsEstimated: true,
-                // Vertex returns bytes rather than hosting the clip, so there is
-                // no task to resume and no URL that expires.
-                taskId: "",
-                sourceUrl: "",
-              };
-
-              set((state) => ({ videos: insertVideos(state.videos, video) }));
-              void putVideo(video).catch(() => {
-                /* persistence is best-effort; the clip is already in memory */
-              });
-              return { ok: true };
-            }
-
-            // Resume rather than restart. A shot that already has a task id was
-            // paid for on a previous attempt — re-creating it would bill a
-            // second render for the same clip, which at Veo prices is the most
-            // expensive mistake this app could make.
-            let taskId = shot.taskId;
-            if (!taskId) {
-              // Encoded per attempt rather than up front: a batch of twenty rows
-            // would otherwise hold twenty multi-megabyte clips in memory at
-            // once, and a retry would reuse a cut the row may have changed.
-            let cut = null;
+            let audio;
             if (isAudioDriven(spec) && shot.audio) {
-              const source = get().audioSources.find(
-                (entry) => entry.id === shot.audio!.sourceId
-              );
-              if (!source?.decoded) {
-                return {
-                  ok: false,
-                  error: "That voice track is no longer loaded — re-add it and try again.",
-                  retryable: false,
-                };
-              }
-              const encoded = await encodeCut(
-                source.decoded,
-                shot.audio.start,
-                shot.audio.duration
-              );
-              // encodeCut already steps the rate down to fit and throws if it
-              // can't; this is the belt to that pair of braces.
-              if (encoded.bytes > CUT_BUDGET_BYTES) {
-                return {
-                  ok: false,
-                  error: `That cut encodes to ${(encoded.bytes / 1024 / 1024).toFixed(1)} MB, too large to send. Shorten it.`,
-                  retryable: false,
-                };
-              }
-              cut = {
-                base64: encoded.base64,
-                mimeType: encoded.mimeType,
-                seconds: encoded.seconds,
-              };
+              const source = get().audioSources.find(entry => entry.id === shot.audio!.sourceId);
+              if (!source?.decoded) throw new Error("Re-add the voice track before starting this batch.");
+              if (shot.audio.start < 0 || shot.audio.start + shot.audio.duration > source.decoded.duration + 0.001) throw new Error("The selected audio cut extends beyond this track. Trim it again.");
+              const cut = await encodeCut(source.decoded, shot.audio.start, shot.audio.duration, billing.provider === "heygen" ? 32 * 1024 * 1024 : undefined);
+              if (cut.bytes > (billing.provider === "heygen" ? 32 * 1024 * 1024 : CUT_BUDGET_BYTES)) throw new Error("Audio cut is too large. Shorten it.");
+              audio = { base64: cut.base64, mimeType: cut.mimeType, seconds: cut.seconds };
             }
-
-            const started = await startVideo(
-                {
-                  accountId,
-                  model: shot.model,
-                  prompt: stripCueLines(shot.prompt),
-                  image: { base64: shot.image.base64, mimeType: shot.image.mimeType },
-                  duration: shot.duration,
-                  resolution: shot.resolution,
-                  aspectRatio: shot.aspectRatio,
-                  audio: cut ?? undefined,
-                },
-                { signal }
-              );
-              if (!started.ok) {
-                return {
-                  ok: false,
-                  error: started.error,
-                  retryable: started.retryable,
-                };
-              }
-              taskId = started.taskId;
-              get().updateShot(shot.id, { taskId });
-            }
-
-            const settled = await awaitVideo(accountId, taskId, shot.model, signal);
-            if (!settled.ok) {
-              // A render that genuinely failed frees the id, so a retry starts a
-              // fresh task. A transient read failure keeps it, so a retry
-              // resumes the render already in flight.
-              if (settled.retryable === false) {
-                get().updateShot(shot.id, { taskId: undefined });
-              }
-              return {
-                ok: false,
-                error: settled.error,
-                retryable: settled.retryable,
-              };
-            }
-
-            // The clip exists on kie's CDN now and is already paid for. Pull the
-            // bytes before that URL expires; a failure here is worth retrying
-            // because the generation itself succeeded.
-            const file = await downloadVideoBlob(settled.videoUrl, signal);
-            if (!file.ok) return { ok: false, error: file.error, retryable: true };
-
-            // kie's Veo namespace reports no per-task credit figure, so a clip
-            // that comes back as 0 falls back to the known rate and is labelled
-            // estimated — better than a gallery that claims Veo was free.
-            const reported = settled.credits;
-            const creditsEstimated = reported <= 0;
-            const credits = creditsEstimated
-              ? (creditsPerImage(
-                  shot.model,
-                  shotSize(shot),
-                  get().creditRates
-                ) ?? 0)
-              : reported;
-
+            return { job, provider: billing.provider, request: {
+              accountId: billing.accountId, model: shot.model, prompt: stripCueLines(shot.prompt),
+              ...(shot.image ? { image: { base64: shot.image.base64, mimeType: shot.image.mimeType } } : {}),
+              duration: shot.duration, resolution: shot.resolution, aspectRatio: shot.aspectRatio, audio, heygen: shot.heygen,
+            } };
+          },
+          collect: async (job, result, origin) => {
+            if (!result.ok) return result;
+            if (!("video" in result)) return { ok: false, error: "Unexpected image result." };
+            const shot = runnable.find(candidate => candidate.id === job.id)!;
+            const spec = videoModel(shot.model);
+            const response = await fetch(result.url);
+            if (!response.ok) throw new Error("Could not load the completed video. It remains in Activity.");
+            const blob = await response.blob();
+            const creditsEstimated = result.credits <= 0;
+            const credits = creditsEstimated ? (billing.provider !== "kie" ? 0 : creditsPerImage(shot.model, shotSize(shot), get().creditRates) ?? 0) : result.credits;
             const video: GeneratedVideo = {
-              id: `${shot.id}@${Date.now()}`,
-              shotId: shot.id,
-              prompt: stripCueLines(shot.prompt),
-              tag: shotTag(shot),
-              model: shot.model,
-              modelLabel: spec.label,
-              mimeType: file.blob.type || "video/mp4",
-              blob: file.blob,
-              sizeBytes: file.blob.size,
-              duration: shot.duration,
-              resolution: settled.actualResolution ?? shot.resolution,
-              aspectRatio: shot.aspectRatio,
-              posterBase64: shot.image.base64,
-              posterMimeType: shot.image.mimeType,
-              // Requested position, not arrival position — the gallery orders
-              // on these so clips follow the shot rows as entered.
-              batchId,
-              batchCreatedAt,
-              promptIndex: job.promptIndex,
-              createdAt: Date.now(),
-              credits,
-              creditsEstimated,
-              taskId,
-              sourceUrl: settled.videoUrl,
+              ...origin,
+              id: batchId + "-" + shot.id, shotId: shot.id, prompt: stripCueLines(shot.prompt), tag: shotTag(shot),
+              model: shot.model, modelLabel: spec.label, mimeType: result.mimeType, blob, sizeBytes: blob.size,
+              duration: shotSize(shot).duration, resolution: result.actualResolution ?? shotSize(shot).resolution,
+              aspectRatio: shot.aspectRatio, posterBase64: shot.image?.base64 ?? "", posterMimeType: shot.image?.mimeType ?? "",
+              batchId, batchCreatedAt, promptIndex: job.promptIndex, createdAt: Date.now(),
+              credits, creditsEstimated, taskId: result.taskId, sourceUrl: result.sourceUrl,
+              ...(billing.provider === "heygen" ? { estimatedUsd: heygenEstimate(shot.audio?.duration ?? 0) } : {}),
+              ...(billing.provider === "vertex" ? { estimatedUsd: videoRate(spec.requestModel, false, shot.resolution).usd * shot.duration } : {}),
             };
-
-            set((state) => ({
-              videos: insertVideos(state.videos, video),
-              // Only a figure kie actually reported teaches anything; feeding
-              // our own estimate back in would just reinforce itself.
-              creditRates: creditsEstimated
-                ? state.creditRates
-                : recordRate(
-                    state.creditRates,
-                    shot.model,
-                    shotSize(shot),
-                    reported,
-                    1
-                  ),
-            }));
-            void putVideo(video).catch(() => {
-              /* persistence is best-effort; the clip is already in memory */
-            });
-
-            // The clip is collected, so the id has served its purpose. Clearing
-            // it means a deliberate re-run generates a new take.
-            get().updateShot(shot.id, { taskId: undefined });
+            set(state => ({ videos: insertVideos(state.videos, video), creditRates: creditsEstimated ? state.creditRates
+              : recordRate(state.creditRates, shot.model, shotSize(shot), result.credits, 1) }));
+            void putVideo(video).catch(() => {});
             return { ok: true };
           },
         });
@@ -834,6 +589,8 @@ export const useVideoStore = create<VideoStore>()(
       // belongs in localStorage. Only the knobs persist; the storyboard is
       // rebuilt by dropping the images again, and clips live in IndexedDB.
       partialize: (state) => ({
+        inputMode: state.inputMode,
+        promptText: state.promptText,
         defaults: state.defaults,
         provider: state.provider,
         accountId: state.accountId,
@@ -853,6 +610,7 @@ export const useVideoStore = create<VideoStore>()(
           ...current,
           ...saved,
           defaults: { ...current.defaults, ...(saved.defaults ?? {}) },
+          retries: 1,
         };
       },
     }

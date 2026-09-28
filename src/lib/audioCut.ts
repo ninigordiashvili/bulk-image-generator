@@ -109,7 +109,8 @@ const base64Length = (bytes: number) => Math.ceil(bytes / 3) * 4;
 export async function encodeCut(
   decoded: DecodedAudio,
   start: number,
-  duration: number
+  duration: number,
+  budgetBytes = CUT_BUDGET_BYTES
 ): Promise<EncodedCut> {
   const { pcm, sampleRate } = decoded;
   const from = Math.max(0, Math.min(Math.round(start * sampleRate), pcm.length - 1));
@@ -121,7 +122,7 @@ export async function encodeCut(
     if (rate > sampleRate) continue;
     const samples = rate === sampleRate ? slice : downsample(slice, sampleRate, rate);
     const bytes = 44 + samples.length * 2;
-    if (base64Length(bytes) > CUT_BUDGET_BYTES) continue;
+    if (base64Length(bytes) > budgetBytes) continue;
     const wav = encodeWav(samples, rate);
     return {
       base64: toBase64(wav),
@@ -130,6 +131,8 @@ export async function encodeCut(
       seconds,
     };
   }
+
+  if (budgetBytes > CUT_BUDGET_BYTES) throw new Error("Audio cut exceeds the HeyGen WAV upload limit. Shorten the selected segment.");
 
   // Nothing uncompressed fits — a cut of several minutes. AAC or nothing.
   const aac = await encodeAac(slice, sampleRate).catch(() => null);

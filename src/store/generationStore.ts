@@ -20,8 +20,9 @@ import {
 } from "@/lib/kieModels";
 import { recordRate, type CreditRates } from "@/lib/pricing";
 import { parsePrompts, resolveCharactersForPrompt } from "@/lib/prompts";
-import { GenerationQueue } from "@/services/GenerationQueue";
-import { fetchAccounts, fetchCredits, generateImage } from "@/services/kieApi";
+import { BackgroundQueue, newBatchId } from "@/services/BackgroundQueue";
+import type { WorkStatus } from "@/types/work";
+import { fetchAccounts, fetchCredits } from "@/services/kieApi";
 import { defaultModelFor } from "@/lib/kieModels";
 import {
   CUSTOM_MODEL,
@@ -60,6 +61,7 @@ interface GenerationStore {
   galleryHydrated: boolean;
 
   // live, in-memory only
+  backgroundStatus: WorkStatus | null;
   jobs: GenerationJob[];
   progress: QueueProgress;
   queueState: QueueState;
@@ -97,7 +99,7 @@ interface GenerationStore {
   clearGallery: () => Promise<void>;
 }
 
-let queue: GenerationQueue | null = null;
+let queue: BackgroundQueue | null = null;
 
 const DEFAULT_SETTINGS: GenerationSettings = {
   provider: "kie",
@@ -202,7 +204,7 @@ export const useGenerationStore = create<GenerationStore>()(
   persist(
     (set, get) => ({
       settings: reconcileSettings(DEFAULT_SETTINGS),
-      queueConfig: { concurrency: 3, retries: 2 },
+      queueConfig: { concurrency: 3, retries: 1 },
       characters: [],
       promptText: "",
       creditRates: {},
@@ -210,6 +212,7 @@ export const useGenerationStore = create<GenerationStore>()(
       images: [],
       galleryHydrated: false,
 
+      backgroundStatus: null,
       jobs: [],
       progress: EMPTY_PROGRESS,
       queueState: "idle",
@@ -254,10 +257,9 @@ export const useGenerationStore = create<GenerationStore>()(
       },
 
       setQueueConfig: (patch) => {
-        set((state) => ({ queueConfig: { ...state.queueConfig, ...patch } }));
+        set((state) => ({ queueConfig: { ...state.queueConfig, ...patch, retries: 1 } }));
         const next = get().queueConfig;
         queue?.setConcurrency(next.concurrency);
-        queue?.setRetries(next.retries);
       },
 
       setPromptText: (promptText) => set({ promptText }),
@@ -320,6 +322,7 @@ export const useGenerationStore = create<GenerationStore>()(
             accountsLoading: false,
             accountsError: result.error,
             accounts: [],
+            settings: { ...get().settings, accountId: "" },
             accountProblems: [],
             credits: null,
           });
@@ -366,6 +369,7 @@ export const useGenerationStore = create<GenerationStore>()(
       },
 
       startGeneration: () => {
+        if (isRunning(get().queueState)) return;
         const { settings, queueConfig, promptText, characters } = get();
 
         /**
@@ -394,7 +398,7 @@ export const useGenerationStore = create<GenerationStore>()(
         // Identifies this run so its images stay grouped and ordered together,
         // however long individual jobs take to come back.
         const batchCreatedAt = Date.now();
-        const batchId = `batch-${batchCreatedAt}`;
+        const batchId = `batch-${newBatchId()}`;
 
         const jobs: GenerationJob[] = [];
         prompts.forEach((prompt, promptIndex) => {
@@ -414,14 +418,15 @@ export const useGenerationStore = create<GenerationStore>()(
           }
         });
 
-        queue = new GenerationQueue({
-          concurrency: queueConfig.concurrency,
-          retries: queueConfig.retries,
-          runJob: async (job, signal) => {
+        queue = new BackgroundQueue({
+          execution: settings.provider === "vertex" && settings.vertexImageMode === "batch" && settings.model === "gemini-3.1-flash-lite-image" ? "vertex-batch" : "standard",
+          kind: "image", accountId: settings.accountId, concurrency: queueConfig.concurrency,
+          onStatus: (backgroundStatus) => set({ backgroundStatus }),
+          prepare: async (job) => {
             const current = locked.settings;
             const model = activeModelId(current);
             if (!model) {
-              return { ok: false, error: "No model id set.", retryable: false };
+              throw new Error("No model id set.");
             }
 
             const spec = findModel(model);
@@ -433,25 +438,29 @@ export const useGenerationStore = create<GenerationStore>()(
               .filter((character) => job.referencedCharacterIds.includes(character.id))
               .slice(0, Math.max(limit, 0));
 
-            const response = await generateImage(
-              {
+
+            return { job, provider: current.provider, request: {
                 provider: current.provider,
-              accountId: current.accountId,
+                accountId: current.accountId,
                 model,
                 prompt: job.prompt,
                 styleBible: current.styleBible,
                 referenceImages: refs.map((ref) => ({
-                  label: ref.label,
+                  label: current.provider === "vertex" ? `Reference @${ref.id}: ${ref.label}` : ref.label,
                   base64: ref.base64,
                   mimeType: ref.mimeType,
                 })),
                 input,
                 imageField: spec?.imageField,
                 imageSingle: spec?.imageSingle,
-              },
-              { signal }
-            );
-
+              } };
+          },
+          collect: async (job, response, origin) => {
+            if (response.ok && "video" in response) return { ok: false, error: "Unexpected video result." };
+            const current = locked.settings;
+            const model = activeModelId(current)!;
+            const spec = findModel(model);
+            const input = activeInput(current);
             if (!response.ok) {
               return {
                 ok: false,
@@ -476,7 +485,8 @@ export const useGenerationStore = create<GenerationStore>()(
                   ? { width: image.width, height: image.height }
                   : null;
               return {
-                id: `${job.id}@${Date.now()}-${index}`,
+                id: `${batchId}-${job.id}-${index}`,
+                ...origin,
                 jobId: job.id,
                 prompt: job.prompt,
                 tag: job.tag ?? undefined,
@@ -614,6 +624,7 @@ export const useGenerationStore = create<GenerationStore>()(
       onRehydrateStorage: () => (state) => {
         if (!state) return;
         state.settings = reconcileSettings(state.settings);
+        state.queueConfig = { ...state.queueConfig, retries: 1 };
       },
     }
   )

@@ -76,6 +76,7 @@ export async function loadAccounts(): Promise<LoadedAccounts> {
       return;
     }
     seenIds.add(id);
+    if (record.disabled === true) return;
 
     if (!apiKey) {
       problems.push({

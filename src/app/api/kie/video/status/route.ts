@@ -8,9 +8,9 @@ import type { VideoStatusResponse } from "@/types";
 /** A single read of one task. Returns in well under a second. */
 export const maxDuration = 60;
 
-function fail(error: string, status = 400, retryable = false) {
+function fail(error: string, status = 400, retryable = false, taskFailed = false) {
   return NextResponse.json<VideoStatusResponse>(
-    { ok: false, error, retryable },
+    { ok: false, error, retryable, taskFailed },
     { status }
   );
 }
@@ -68,7 +68,8 @@ export async function GET(request: NextRequest) {
         record.errorMessage?.trim() || `Veo task ${taskId} failed.`,
         502,
         // A failed render can succeed on a resample; a rejected request cannot.
-        !record.errorCode || record.errorCode >= 500
+        !record.errorCode || record.errorCode >= 500,
+        true
       );
     }
 
@@ -81,7 +82,8 @@ export async function GET(request: NextRequest) {
       return fail(
         record.failMsg?.trim() || `kie.ai task ${taskId} failed.`,
         502,
-        !Number.isFinite(code) || code >= 500
+        !Number.isFinite(code) || code >= 500,
+        true
       );
     }
     const videoUrl = resultUrls(record)[0];

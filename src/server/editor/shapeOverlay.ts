@@ -86,12 +86,16 @@ export function shapeGraph(
       // stale plate — one rasterised before the export resolution was changed —
       // from landing at the wrong scale.
       `scale=${frameWidth}:${frameHeight}:flags=bicubic`,
+      // Evaluate fades on the project clock, then restore segment timestamps.
+      // A fade can already be in progress when this clip begins.
+      `setpts=PTS+${segmentStart}/TB`,
       fade.in > 0.001
-        ? `fade=t=in:st=${fixed(Math.max(0, start))}:d=${fixed(fade.in)}:alpha=1`
+        ? `fade=t=in:st=${fixed(shape.start)}:d=${fixed(fade.in)}:alpha=1`
         : "",
       fade.out > 0.001
-        ? `fade=t=out:st=${fixed(end - fade.out)}:d=${fixed(fade.out)}:alpha=1`
+        ? `fade=t=out:st=${fixed(shape.start + shape.duration - fade.out)}:d=${fixed(fade.out)}:alpha=1`
         : "",
+      `setpts=PTS-${segmentStart}/TB`,
       // After the fade, which ramps alpha back to the plate's own — the same
       // order the backdrop plates use, and the reason the preview multiplies
       // fade by opacity rather than baking one into the other.

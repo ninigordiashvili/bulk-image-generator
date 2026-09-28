@@ -23,7 +23,8 @@ import {
 } from "@/types/editor";
 import { STYLE_ORDER, type MomentStyle } from "@/lib/editor/textStyles";
 
-const FILM_LOOKS: FilmLook[] = ["off", "subtle", "medium", "heavy"];
+import { FILM_LABELS, validateEffectSettings } from "@/lib/editor/timedEffects";
+const FILM_LOOKS = Object.keys(FILM_LABELS) as FilmLook[];
 
 function fail(error: string, status = 400) {
   return NextResponse.json<ErrorResponse>({ ok: false, error }, { status });
@@ -66,6 +67,11 @@ export async function POST(
 
   const validated = validate(body);
   if ("error" in validated) return fail(validated.error);
+
+  if (getJob(id) !== job) return fail("This export was deleted. Create a new session.", 404);
+
+  // The body read yields; another request may have claimed this job meanwhile.
+  if (job.controller) return fail("This session is already rendering.", 409);
 
   // Deliberately not awaited: the render outlives this request, and its
   // progress is read back through GET /api/editor/job/[id].
@@ -110,12 +116,13 @@ function validate(
       clip.kind === "avatar" || clip.kind === "motion" ? clip.kind : "still";
     const sourceSeconds = Number(clip.sourceSeconds);
     clips.push({
+      label: typeof clip.label === "string" ? clip.label.slice(0, 512) : "",
       file,
       kind,
       start,
       end,
-      // Belt to the client's braces: a talking clip never zooms and never
-      // wears the film look, whatever the request claims.
+      // General zoom never affects avatars. Explicit narration zoom is
+      // resolved separately by the renderer from validated settings.
       zoom: kind === "avatar" ? "none" : zoom,
       film: kind === "avatar" ? false : Boolean(clip.film),
       sourceSeconds: Number.isFinite(sourceSeconds) && sourceSeconds > 0 ? sourceSeconds : undefined,
@@ -123,15 +130,24 @@ function validate(
   }
 
   const raw = body.settings ?? ({} as RenderSettings);
+  const effectError = validateEffectSettings(raw);
+  if (effectError) return { error: effectError };
   const fps = FPS_CHOICES.includes(Number(raw.fps) as (typeof FPS_CHOICES)[number])
     ? Number(raw.fps)
     : 30;
 
   const settings: RenderSettings = {
+    motionRanges: raw.motionRanges?.map(r => ({ id: String(r.id), start: r.start, end: r.end, effect: r.effect, direction: r.direction, amount: r.amount })),
+    filmRanges: raw.filmRanges?.map(r => ({ id: String(r.id), start: r.start, end: r.end, look: r.look })),
+    filmRangesEnabled: raw.filmRangesEnabled === true,
+    narrationTransitions: raw.narrationTransitions !== false,
+    narrationZoomAmount: clamp(Number(raw.narrationZoomAmount) || 0, 0, 0.2),
     // Even dimensions are a hard requirement of H.264's chroma subsampling.
     width: clamp(Math.round(Number(raw.width) / 2) * 2 || 1920, 256, 3840),
     height: clamp(Math.round(Number(raw.height) / 2) * 2 || 1080, 144, 2160),
     fps,
+    videoBitrateKbps: [6000, 8000, 10000].includes(Number(raw.videoBitrateKbps))
+      ? Number(raw.videoBitrateKbps) : 0,
     encoder: raw.encoder === "h264_videotoolbox" ? "h264_videotoolbox" : "libx264",
     zoomAmount: clamp(Number(raw.zoomAmount) || 0, 0, 0.5),
     zoomAmountMotion: clamp(Number(raw.zoomAmountMotion) || 0, 0, 0.5),

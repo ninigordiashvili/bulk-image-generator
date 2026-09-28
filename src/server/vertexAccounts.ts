@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -72,6 +72,60 @@ export interface VertexAccountPublic {
 export interface LoadedVertexAccounts {
   accounts: VertexAccount[];
   problems: { id: string; problem: string }[];
+}
+
+export interface NewVertexAccount {
+  id: string;
+  label: string;
+  projectId: string;
+  location?: string;
+  credentials: string;
+  creditUsd?: number;
+}
+
+/** Adds non-secret account metadata; credential JSON stays outside the browser. */
+export async function addVertexAccount(input: NewVertexAccount): Promise<void> {
+  const id = input.id.trim();
+  const label = input.label.trim() || id;
+  const projectId = input.projectId.trim();
+  const credentials = input.credentials.trim() || "adc";
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    throw new VertexAccountError("Account id may contain only letters, numbers, underscores, and hyphens.");
+  }
+  if (!projectId || PLACEHOLDER.test(projectId)) {
+    throw new VertexAccountError("A real Google Cloud project id is required.");
+  }
+  if (credentials !== "adc" && /[\r\n]/.test(credentials)) {
+    throw new VertexAccountError("Credential path is invalid.");
+  }
+
+  let entries: unknown[] = [];
+  try {
+    const raw = await readFile(path.join(process.cwd(), CONFIG_FILE), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("not an array");
+    entries = parsed;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new VertexAccountError(`${CONFIG_FILE} must contain a valid JSON array before an account can be added.`);
+    }
+  }
+
+  if (entries.some((entry) => (entry as Record<string, unknown> | null)?.id === id)) {
+    throw new VertexAccountError(`An account named "${id}" already exists.`);
+  }
+
+  entries.push({
+    id,
+    label,
+    projectId,
+    location: input.location?.trim() || "us-central1",
+    credentials,
+    ...(input.creditUsd !== undefined ? { creditUsd: input.creditUsd } : {}),
+  });
+
+  await writeFile(path.join(process.cwd(), CONFIG_FILE), `${JSON.stringify(entries, null, 2)}\n`, "utf8");
 }
 
 const PLACEHOLDER = /PASTE_|YOUR_|CHANGE_ME/i;
@@ -157,10 +211,16 @@ export async function loadVertexAccounts(): Promise<LoadedVertexAccounts> {
       imageConcurrency: positive(row.imageConcurrency),
       videoConcurrency: positive(row.videoConcurrency),
       spendCapUsd: positive(row.spendCapUsd),
-      creditUsd: positive(row.creditUsd),
+      creditUsd: typeof row.creditUsd === "number" && Number.isFinite(row.creditUsd) && row.creditUsd >= 0 ? row.creditUsd : undefined,
     });
   });
 
+  for (const account of accounts) {
+    if (account.credentials !== "adc") {
+      try { await access(path.resolve(process.cwd(), account.credentials)); }
+      catch { problems.push({ id: account.id, problem: "Google Cloud sign-in is required: credential file is missing." }); }
+    }
+  }
   if (accounts.length === 0 && fallback) accounts.push(fallback);
   return { accounts, problems };
 }

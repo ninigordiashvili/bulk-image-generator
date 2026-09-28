@@ -159,7 +159,8 @@ export const STYLE_ORDER: MomentStyle[] = [
 
 /** Falls back rather than throwing, so an unknown saved style still renders. */
 export function styleOf(style: MomentStyle | undefined): StyleSpec {
-  return TEXT_STYLES[style ?? "modern"] ?? TEXT_STYLES.modern;
+  const key = STYLE_ORDER.includes(style as MomentStyle) ? style! : "modern";
+  return { ...TEXT_STYLES[key], css: `"Editor-${key}"` };
 }
 
 /** What actually goes on screen, once the style has had its say. */

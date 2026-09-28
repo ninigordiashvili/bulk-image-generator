@@ -1,5 +1,11 @@
+import { intersectRanges } from "@/lib/editor/timedEffects";
+import { timedMotionChain } from "./timedMotion";
+import { clipZoomSettings } from "@/lib/editor/clipEffects";
+import { narrationDip } from "@/lib/editor/transitions";
 import { promises as fs } from "node:fs";
 import os from "node:os";
+import { acquireRender } from "./renderQueue";
+import { SegmentCache } from "./segmentCache";
 import path from "node:path";
 import type {
   ClipKind,
@@ -17,16 +23,22 @@ import { shapeGraph, shapesInSegment } from "./shapeOverlay";
 import { FFMPEG, FfmpegError, probeDuration, run } from "./ffmpeg";
 import { outputPath, resolveInside, setPhase, type Job } from "./jobs";
 
-/**
- * Leave a couple of cores for the OS and the dev server. Each worker is a whole
- * ffmpeg, and both the zoom filter and libx264 thread internally on top of
- * this, so going wider stops paying off well before the core count — measured
- * flat between 4 and 9 workers on a 10-core machine.
- */
-const CONCURRENCY = Math.max(2, Math.min(6, os.cpus().length - 2));
+/** Reserve CPU and memory for the editor; large frames need fewer workers. */
+export function renderConcurrency(settings: RenderSettings): number {
+  const requested = Number(process.env.EDITOR_RENDER_WORKERS);
+  const automatic = Math.max(1, Math.min(4, Math.floor((os.availableParallelism() - 2) / 2)));
+  const workers = Number.isInteger(requested) && requested >= 1 && requested <= 8 ? requested : automatic;
+  const perWorker = 1024 ** 3 * Math.max(1, settings.width * settings.height / (1920 * 1080));
+  const memoryLimit = Math.max(1, Math.floor(os.freemem() * 0.6 / perWorker));
+  return Math.min(workers, memoryLimit);
+}
+const THREADS = "2";
 
 /** A clip's boundaries in whole frames, and how to build it. */
 export interface PlannedSegment {
+  label?: string;
+  fadeIn?: number;
+  fadeOut?: number;
   index: number;
   /** Absolute path to the source, or null for a black gap. */
   source: string | null;
@@ -78,6 +90,8 @@ export function planSegments(
         : 1;
 
     segments.push({
+      ...narrationDip(clips, index),
+      label: clip.label,
       index,
       source: clip.file ? path.join(dir, "images", clip.file) : null,
       kind: clip.file ? clip.kind : "still",
@@ -165,6 +179,8 @@ export function zoomChain(
  * and re-encoding ten minutes of video a second time.
  */
 export function codecArgs(settings: RenderSettings): string[] {
+  const bitrate = [6000, 8000, 10000].includes(settings.videoBitrateKbps)
+    ? settings.videoBitrateKbps : 0;
   if (settings.encoder === "h264_videotoolbox") {
     // The hardware encoder takes a bitrate, not a quality target. A slideshow
     // is cheap to code, so this is deliberately generous.
@@ -172,7 +188,7 @@ export function codecArgs(settings: RenderSettings): string[] {
     const mbps = Math.min(60, Math.max(4, Math.round(bits / 1_000_000)));
     return [
       "-c:v", "h264_videotoolbox",
-      "-b:v", `${mbps}M`,
+      "-b:v", bitrate ? `${bitrate}k` : `${mbps}M`,
       "-profile:v", "high",
       "-pix_fmt", "yuv420p",
       "-allow_sw", "1",
@@ -186,8 +202,9 @@ export function codecArgs(settings: RenderSettings): string[] {
 
   return [
     "-c:v", "libx264",
+    "-threads:v", THREADS,
     "-preset", "veryfast",
-    "-crf", "20",
+    ...(bitrate ? ["-b:v", `${bitrate}k`] : ["-crf", "20"]),
     "-profile:v", "high",
     "-level", level,
     "-pix_fmt", "yuv420p",
@@ -247,9 +264,15 @@ function flickerExpression(f: Flicker): string {
   );
 }
 
-export function filmChain(look: FilmLook): string {
+export function filmChain(look: FilmLook, enable?: string): string {
   if (look === "off") return "";
 
+  const gate = (parts: string[]) => parts.map(p => enable ? p + ":enable='" + enable + "'" : p).join(',');
+  if (look === 'monochrome') return gate(['hue=s=0']);
+  if (look === 'sepia') return gate(['colorchannelmixer=rr=0.393:rg=0.769:rb=0.189:gr=0.349:gg=0.686:gb=0.168:br=0.272:bg=0.534:bb=0.131']);
+  if (look === 'warm') return gate(['colorchannelmixer=rr=1:gg=0.94902:bb=0.87843']);
+  if (look === 'cool') return gate(['colorchannelmixer=rr=0.87843:gg=0.94902:bb=1']);
+  if (look === 'vignette') return gate(['vignette=PI/4.2']);
   const preset = {
     subtle: {
       grain: 6, vignette: "PI/5", sat: 0.9, contrast: 1.03,
@@ -275,7 +298,7 @@ export function filmChain(look: FilmLook): string {
     `noise=alls=${preset.grain}:allf=t+u`
   );
 
-  return parts.join(",");
+  return gate(parts);
 }
 
 /**
@@ -334,7 +357,8 @@ export function segmentArgs(
   shapes: ShapeElement[] = []
 ): string[] {
   const { width, height, fps } = settings;
-  const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y"];
+  const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+    "-filter_threads", THREADS, "-filter_complex_threads", THREADS];
   const isVideo = segment.kind !== "still";
 
   let chain: string;
@@ -346,13 +370,13 @@ export function segmentArgs(
     // An avatar is cut at the point the talking stops, so the picture doesn't
     // sit on a closed mouth while the narration carries on underneath.
     if (segment.sourceSeconds > 0) args.push("-t", segment.sourceSeconds.toFixed(3));
-    args.push("-i", segment.source);
+    args.push("-threads", THREADS, "-i", segment.source);
     chain = videoChain(width, height, fps, segment.frames, segment.stretch);
   } else {
     // `-framerate` matters: perspective animates on the frame counter, so the
     // stream has to arrive at the output rate or the move runs at the wrong
     // speed and the segment comes out the wrong length.
-    args.push("-loop", "1", "-framerate", String(fps), "-i", segment.source);
+    args.push("-loop", "1", "-framerate", String(fps), "-threads", THREADS, "-i", segment.source);
     chain = `${fitChain(width, height)},fps=${fps}`;
   }
 
@@ -360,15 +384,27 @@ export function segmentArgs(
   // is also what lets a motion clip take one. It never did before: the video
   // branch simply had no zoom in it, so the setting was accepted and ignored.
   if (segment.source !== null) {
-    const amount =
-      segment.kind === "motion" ? settings.zoomAmountMotion : settings.zoomAmount;
-    const move = zoomChain(width, height, segment.frames, segment.zoom, amount);
+    const { direction, amount } = clipZoomSettings(segment, segment.zoom, settings);
+    const move = segment.kind === 'still' && settings.effectsOnStills && intersectRanges(settings.motionRanges, segment.startSeconds, segment.endSeconds).length
+      ? timedMotionChain(segment, settings, direction, amount)
+      : zoomChain(width, height, segment.frames, direction, amount);
     if (move) chain = `${chain},${move}`;
   }
 
   // The look goes on last, over whatever the clip turned out to be — and only
   // where the settings allow it, which is never on a talking face.
-  const film = segment.film ? filmChain(settings.film) : "";
+  const eligibleFilm = segment.source !== null && segment.kind !== 'avatar' && (segment.kind === 'still' ? settings.effectsOnStills : settings.effectsOnMotion);
+  const film = !eligibleFilm ? '' : settings.filmRangesEnabled
+    ? intersectRanges(settings.filmRanges, segment.startSeconds, segment.endSeconds).map(r => {
+      const start = Math.round(r.start * fps) / fps - segment.startSeconds;
+      const end = Math.round(r.end * fps) / fps - segment.startSeconds;
+      return filmChain(r.look, 'gte(t,' + start.toFixed(6) + ')*lt(t,' + end.toFixed(6) + ')');
+    }).filter(Boolean).join(',')
+    : segment.film ? filmChain(settings.film) : '';
+  if (settings.narrationTransitions !== false) {
+    if (segment.fadeIn) chain += `,fade=t=in:st=0:d=${segment.fadeIn.toFixed(4)}`;
+    if (segment.fadeOut) chain += `,fade=t=out:st=${(segment.frames / settings.fps - segment.fadeOut).toFixed(4)}:d=${segment.fadeOut.toFixed(4)}`;
+  }
 
   // Text sits above the look: grain and vignette belong to the picture, and a
   // caption is not part of the picture.
@@ -398,7 +434,7 @@ export function segmentArgs(
   plates.forEach((file, index) => {
     // Looped so the still is an endless stream for `overlay` to draw from, and
     // at the output rate so its own clock matches the segment's.
-    args.push("-loop", "1", "-framerate", String(fps), "-i", backdrops.get(file)!);
+    args.push("-loop", "1", "-framerate", String(fps), "-threads", THREADS, "-i", backdrops.get(file)!);
     used.set(file, index + 1);
   });
 
@@ -561,16 +597,26 @@ export function muxArgs(
  * client polls `job.status` instead.
  */
 export async function renderJob(job: Job, request: RenderRequest): Promise<void> {
+  if (job.controller) throw new Error("This session is already rendering.");
   const controller = new AbortController();
   job.controller = controller;
+  job.cancelRequested = false;
   job.startedAt = Date.now();
   job.status.error = null;
   job.status.outputBytes = 0;
   job.status.done = 0;
   setPhase(job, "preparing", "Checking the timeline…");
 
+  let release: (() => void) | undefined;
+  let cache: SegmentCache | undefined;
   try {
+    setPhase(job, "preparing", "Waiting for the local renderer...");
+    release = await acquireRender(controller.signal);
+    if (controller.signal.aborted) throw new Error("Cancelled.");
+    setPhase(job, "preparing", "Checking the timeline...");
     const settings = request.settings;
+    cache = new SegmentCache();
+    await cache.prepare();
     const segmentDir = path.join(job.dir, "segments");
     await fs.rm(segmentDir, { recursive: true, force: true });
     await fs.mkdir(segmentDir, { recursive: true });
@@ -662,7 +708,8 @@ export async function renderJob(job: Job, request: RenderRequest): Promise<void>
       controller,
       moments,
       backdrops,
-      shapes
+      shapes,
+      cache
     );
 
     setPhase(job, "muxing", "Joining clips and adding audio…");
@@ -721,7 +768,9 @@ export async function renderJob(job: Job, request: RenderRequest): Promise<void>
       .rm(path.join(job.dir, "segments"), { recursive: true, force: true })
       .catch(() => {});
   } finally {
+    await cache?.prune().catch(() => {});
     job.controller = null;
+    release?.();
   }
 }
 
@@ -738,11 +787,13 @@ async function renderSegments(
   controller: AbortController,
   moments: TextMoment[],
   backdrops: Map<string, string>,
-  shapes: ShapeElement[]
+  shapes: ShapeElement[],
+  cache: SegmentCache
 ): Promise<void> {
   const { signal } = controller;
   let next = 0;
   let failure: Error | null = null;
+  let reused = 0;
 
   const worker = async () => {
     for (;;) {
@@ -751,11 +802,11 @@ async function renderSegments(
       if (index >= segments.length) return;
       const segment = segments[index];
       try {
-        await run(
-          FFMPEG,
+        const hit = await cache.materialize(
           segmentArgs(segment, settings, segmentDir, moments, backdrops, shapes),
-          { signal }
+          args => run(FFMPEG, args, { signal })
         );
+        if (hit) reused++;
       } catch (error) {
         if (signal.aborted) return;
         const name = segment.source ? path.basename(segment.source) : "black gap";
@@ -766,12 +817,12 @@ async function renderSegments(
         return;
       }
       job.status.done += 1;
-      job.status.message = `Rendering clips — ${job.status.done} of ${segments.length}`;
+      job.status.message = `Rendering clips — ${job.status.done} of ${segments.length}${reused ? ` (${reused} reused)` : ""}`;
     }
   };
 
   await Promise.all(
-    Array.from({ length: Math.min(CONCURRENCY, segments.length) }, worker)
+    Array.from({ length: Math.min(renderConcurrency(settings), segments.length) }, worker)
   );
 
   if (failure) throw failure;

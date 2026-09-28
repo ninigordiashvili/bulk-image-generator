@@ -65,7 +65,8 @@ export function estimateVideos(
   model: string,
   quotaPerMinute: number,
   concurrency: number,
-  withAudio = false
+  withAudio = false,
+  resolutions: string[] = []
 ): BatchEstimate {
   const spec = findVertexVideoModel(model);
   const fixed = spec?.typicalCallSeconds ?? 29;
@@ -85,7 +86,7 @@ export function estimateVideos(
     perMinute,
     minutes,
     boundBy,
-    usd: totalOutput * videoRate(model, withAudio).usd,
+    usd: clipSeconds.reduce((sum, seconds, index) => sum + seconds * videoRate(model, withAudio, resolutions[index]).usd, 0),
   };
 }
 

@@ -37,6 +37,8 @@ export async function POST(
     keepGap?: unknown;
     thresholdDb?: unknown;
     leadIn?: unknown;
+    evenVolume?: unknown;
+    shortenPauses?: unknown;
   };
   try {
     body = await request.json();
@@ -58,6 +60,8 @@ export async function POST(
   });
   const options = {
     ...pacing,
+    evenVolume: body.evenVolume === true,
+    shortenPauses: body.shortenPauses !== false,
     // Measured from the recording unless a number was sent deliberately. The
     // old default of -35 was the bug: a take whose room tone sat above it had
     // none of its pauses found at all.

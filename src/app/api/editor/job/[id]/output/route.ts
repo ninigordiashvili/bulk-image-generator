@@ -1,3 +1,4 @@
+import { recordDownload } from "@/server/downloadReceipts";
 import { createReadStream, promises as fs } from "node:fs";
 import { Readable } from "node:stream";
 import { getJob, outputPath } from "@/server/editor/jobs";
@@ -14,6 +15,11 @@ export async function GET(
   const { id } = await context.params;
   const job = getJob(id);
   if (!job) return new Response("No such editing session.", { status: 404 });
+  if (job.status.phase !== "done") {
+    return new Response("This export is not complete yet. Check Activity for progress.", {
+      status: 409, headers: { "Cache-Control": "no-store" },
+    });
+  }
 
   const file = outputPath(job);
   const stat = await fs.stat(file).catch(() => null);
@@ -30,6 +36,7 @@ export async function GET(
     "Content-Disposition": `${download ? "attachment" : "inline"}; filename="${name}"`,
   });
 
+  const downloaded = () => recordDownload(job.dir, "output", job.startedAt);
   const range = request.headers.get("range");
   const match = range?.match(/^bytes=(\d*)-(\d*)$/);
 
@@ -47,15 +54,16 @@ export async function GET(
 
     headers.set("Content-Range", `bytes ${start}-${end}/${size}`);
     headers.set("Content-Length", String(end - start + 1));
-    return new Response(toWebStream(file, start, end), { status: 206, headers });
+    return new Response(toWebStream(file, start, end, download && start === 0 && end === size - 1 ? downloaded : undefined), { status: 206, headers });
   }
 
   headers.set("Content-Length", String(stat.size));
-  return new Response(toWebStream(file), { status: 200, headers });
+  return new Response(toWebStream(file, undefined, undefined, download ? downloaded : undefined), { status: 200, headers });
 }
 
-function toWebStream(file: string, start?: number, end?: number): ReadableStream {
+function toWebStream(file: string, start?: number, end?: number, downloaded?: () => Promise<void>): ReadableStream {
   const node = createReadStream(file, start === undefined ? {} : { start, end });
+  if (downloaded) node.once("end", () => { void downloaded().catch(error => console.error("Download receipt failed", error)); });
   return Readable.toWeb(node) as ReadableStream;
 }
 

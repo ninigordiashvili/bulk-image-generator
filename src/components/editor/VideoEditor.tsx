@@ -107,13 +107,19 @@ export function VideoEditor({ renderable }: { renderable: boolean }) {
       <div className="grid gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,3fr)_minmax(320px,1fr)]">
         <div className="space-y-4 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
           <PreviewStage
+            effectSettings={settings}
+            suspended={busy}
             timeline={timeline}
             images={images}
             audio={audio}
             zoom={zoom}
             zoomAmount={settings.zoomAmount}
             zoomAmountMotion={settings.zoomAmountMotion}
+            narrationZoomAmount={settings.narrationZoomAmount ?? 0}
+            effectsOnStills={settings.effectsOnStills}
+            effectsOnMotion={settings.effectsOnMotion}
             film={settings.film}
+            narrationTransitions={settings.narrationTransitions !== false}
             moments={moments}
             shapes={shapes}
             maxStretch={settings.maxStretch}

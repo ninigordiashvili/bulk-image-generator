@@ -1,4 +1,5 @@
 "use client";
+import { HelpTip } from "./HelpTip";
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -62,16 +63,16 @@ export function BulkGenerator() {
   return (
     <main className="mx-auto w-full max-w-[1600px] space-y-4 px-6 py-8">
       <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
+        <div className="flex items-center gap-2">
           <h1 className="text-xl font-semibold">Bulk AI Generator</h1>
-          <p className="mt-1 text-xs text-muted">
+          <HelpTip label="About the generator">
             {KIE_MODELS.length} kie.ai image models + {videoModelsFor("kie").length}{" "}
             video, plus Vertex AI on your Google Cloud credits — everything runs
             locally. The account you pick decides which models are offered.
-          </p>
+          </HelpTip>
         </div>
 
-        {/* The two modes share an account and a credit balance but nothing else:
+        {/* The two modes keep independent accounts and queues:
             different inputs, different queue, different gallery. Switching tabs
             mid-run is safe — each queue keeps running in its own store. */}
         <div className="flex gap-1 rounded-lg border border-line bg-surface-2 p-1">
@@ -103,7 +104,9 @@ export function BulkGenerator() {
         {/* Their own routes rather than more tabs: each holds a lot of media
             in memory, and unmounting all of it every time someone glances at
             the queue would be its own bug. */}
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <a href="/" target="_blank" rel="noopener noreferrer" className="pill">Open another batch</a>
+<HelpTip label="Accounts and batches">Images and videos can run together on different accounts. For additional accounts, open another batch in a new tab. Each started batch keeps its selected account; saved progress and downloads remain in Activity.</HelpTip>
           <Link href="/sound" className="pill">
             Sound editor →
           </Link>
@@ -112,6 +115,7 @@ export function BulkGenerator() {
           </Link>
         </div>
       </header>
+
 
       {mode === "videos" ? (
         <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(300px,1fr)]">
@@ -124,11 +128,6 @@ export function BulkGenerator() {
         <>
           <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
             <div className="space-y-4">
-              <CharacterLibrary disabled={running} />
-              <StyleBible disabled={running} />
-              <BulkPromptInput disabled={running} />
-              <CostEstimate />
-
               <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
@@ -161,6 +160,11 @@ export function BulkGenerator() {
                   </span>
                 )}
               </div>
+
+              <CharacterLibrary disabled={running} />
+              <StyleBible disabled={running} />
+              <BulkPromptInput disabled={running} />
+              <CostEstimate />
             </div>
 
             <div className="space-y-4">

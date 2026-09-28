@@ -35,6 +35,7 @@ export interface VertexImageModel {
   imageSizes: readonly string[];
   verifiedImageSizes: readonly string[];
   maxImages: number;
+  maxReferences: number;
   /** The project's measured per-minute quota for this model. */
   requestsPerMinute: number;
   /**
@@ -72,9 +73,10 @@ export const VERTEX_IMAGE_MODELS: readonly VertexImageModel[] = [
     location: "global",
     aspectRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
     verifiedAspectRatios: ["16:9", "9:16", "1:1"],
-    imageSizes: ["1K", "2K", "4K"],
+    imageSizes: ["1K"],
     verifiedImageSizes: ["1K"],
     maxImages: 1,
+    maxReferences: 14,
     // GenContentImageGenRequestsPerMinutePerProjectPerBaseModelGlobal = 2
     requestsPerMinute: 2,
     // Measured: 5-13s per image when not waiting on quota.
@@ -90,6 +92,7 @@ export const VERTEX_IMAGE_MODELS: readonly VertexImageModel[] = [
     imageSizes: ["1K", "2K", "4K"],
     verifiedImageSizes: ["1K"],
     maxImages: 1,
+    maxReferences: 3,
     requestsPerMinute: 2,
     typicalCallSeconds: 10,
   },

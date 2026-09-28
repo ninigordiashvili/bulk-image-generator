@@ -1,5 +1,10 @@
 "use client";
 
+import { filmAt, motionPose } from "@/lib/editor/timedEffects";
+import type { RenderSettings } from "@/types/editor";
+import { clipZoomSettings } from "@/lib/editor/clipEffects";
+import { narrationDip } from "@/lib/editor/transitions";
+import { useEditorFonts } from "@/lib/editor/useEditorFonts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatTime } from "@/lib/editor/format";
 import { applyLook } from "@/lib/editor/filmPreview";
@@ -30,13 +35,19 @@ const PREVIEW_HEIGHT = 720;
 const PREFETCH = 2;
 
 interface Props {
+  effectSettings: RenderSettings;
+  suspended: boolean;
   timeline: Timeline;
   images: EditorImage[];
   audio: AudioTrack | null;
   zoom: ZoomDirection;
   zoomAmount: number;
   zoomAmountMotion: number;
+  narrationZoomAmount: number;
+  effectsOnStills: boolean;
+  effectsOnMotion: boolean;
   film: FilmLook;
+  narrationTransitions: boolean;
   moments: TextMoment[];
   shapes: ShapeElement[];
   maxStretch: number;
@@ -51,13 +62,19 @@ interface Props {
 }
 
 export function PreviewStage({
+  effectSettings,
+  suspended,
   timeline,
   images,
   audio,
   zoom,
   zoomAmount,
   zoomAmountMotion,
+  narrationZoomAmount,
+  effectsOnStills,
+  effectsOnMotion,
   film,
+  narrationTransitions,
   moments,
   shapes,
   maxStretch,
@@ -67,6 +84,7 @@ export function PreviewStage({
   onMoveShape,
   backdrops,
 }: Props) {
+  useEditorFonts();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
@@ -212,13 +230,14 @@ export function PreviewStage({
 
   const seek = useCallback(
     (time: number) => {
+      if (suspended) return;
       const clamped = Math.max(0, Math.min(total || 0, time));
       timeRef.current = clamped;
       originRef.current = performance.now() - clamped * 1000;
       const element = audioRef.current;
       if (element) element.currentTime = clamped;
     },
-    [total]
+    [total, suspended]
   );
 
   /** Canvas coordinates from a pointer event, as fractions of the frame. */
@@ -239,6 +258,7 @@ export function PreviewStage({
 
   const onPointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
+      if (suspended) return;
       const time = currentTime();
       const point = pointFrom(event);
 
@@ -276,7 +296,7 @@ export function PreviewStage({
       draggedRef.current = false;
       event.currentTarget.setPointerCapture(event.pointerId);
     },
-    [currentTime, pointFrom]
+    [currentTime, pointFrom, suspended]
   );
 
   const onPointerMove = useCallback(
@@ -308,7 +328,7 @@ export function PreviewStage({
   }, [currentTime]);
 
   const play = useCallback(() => {
-    if (total <= 0) return;
+    if (suspended || total <= 0) return;
     // Replay from the top rather than sitting stuck at the end.
     if (timeRef.current >= total - 0.05) seek(0);
     originRef.current = performance.now() - timeRef.current * 1000;
@@ -318,7 +338,7 @@ export function PreviewStage({
       playingRef.current = false;
       setPlaying(false);
     });
-  }, [seek, total]);
+  }, [seek, total, suspended]);
 
   const toggle = useCallback(() => {
     if (playingRef.current) pause();
@@ -364,13 +384,25 @@ export function PreviewStage({
     const context = canvas?.getContext("2d");
     const cache = cacheRef.current;
     if (!canvas || !context || !cache) return;
+    if (suspended) {
+      timeRef.current = currentTime();
+      playingRef.current = false;
+      audioRef.current?.pause();
+      for (const video of videosRef.current.values()) video.pause();
+      const pausedFrame = requestAnimationFrame(() => setPlaying(false));
+      return () => cancelAnimationFrame(pausedFrame);
+    }
 
     let frame = 0;
     let lastIndex = -2;
     let lastReadout = -1;
+    let lastPaint = -Infinity;
 
-    const render = () => {
+    const render = (now: number) => {
       frame = requestAnimationFrame(render);
+      // A paused canvas only needs occasional refreshes for edits and loaded media.
+      if (!playingRef.current && !dragRef.current && now - lastPaint < 125) return;
+      lastPaint = now;
 
       let time = currentTime();
       // Reaching the end — or having the end move behind you because the
@@ -451,7 +483,15 @@ export function PreviewStage({
         context.fillRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
         // Only stills and motion clips wear the look, exactly as they do in
         // the render — a talking face takes neither grain nor zoom.
-        applyLook(context, clip && clip.kind !== "avatar" ? film : "off", time, paint);
+        const eligible = clip?.sourceId && clip.kind !== 'avatar' && (clip.kind === 'still' ? effectsOnStills : effectsOnMotion);
+        const frameTime = Math.round(time * effectSettings.fps) / effectSettings.fps;
+        applyLook(context, eligible ? filmAt({ ...effectSettings, filmRanges: effectSettings.filmRanges?.map(r => ({ ...r, start: Math.round(r.start*effectSettings.fps)/effectSettings.fps, end: Math.round(r.end*effectSettings.fps)/effectSettings.fps })) }, frameTime) : 'off', time, paint);
+        if (clip && narrationTransitions) {
+          const dip = narrationDip(clips, index);
+          const alpha = Math.max(dip.fadeIn ? 1 - (time - clip.start) / dip.fadeIn : 0, dip.fadeOut ? 1 - (clip.end - time) / dip.fadeOut : 0);
+          context.fillStyle = `rgba(0,0,0,${Math.max(0, Math.min(1, alpha))})`;
+          context.fillRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+        }
         // Text goes on above the look, as it does in the render: grain belongs
         // to the picture, and a caption is not part of the picture.
         // Bottom to top, in the order the export composites: the plates a
@@ -494,16 +534,18 @@ export function PreviewStage({
 
     /**
      * How much bigger the picture is at `time`. Stills and motion clips take
-     * their own amounts; a talking face never moves.
+     * their own amounts; narration zoom requires its separate opt-in.
      */
     const zoomScale = (clip: (typeof clips)[number], index: number, time: number) => {
-      if (clip.kind === "avatar") return 1;
-      const amount = clip.kind === "motion" ? zoomAmountMotion : zoomAmount;
+      const { amount, direction } = clipZoomSettings(clip, clipZoom(zoom, index), {
+        zoomAmount, zoomAmountMotion, narrationZoomAmount, effectsOnStills, effectsOnMotion,
+      });
       if (amount <= 0) return 1;
-      const direction = clipZoom(zoom, index);
       if (direction === "none") return 1;
-      const span = Math.max(0.0001, clip.end - clip.start);
-      const progress = Math.min(1, Math.max(0, (time - clip.start) / span));
+      const fps = effectSettings.fps;
+      const firstFrame = Math.round(clip.start * fps);
+      const span = Math.max(1, Math.round(clip.end * fps) - firstFrame - 1);
+      const progress = Math.min(1, Math.max(0, (Math.round(time * fps) - firstFrame) / span));
       return direction === "in" ? 1 + amount * progress : 1 + amount * (1 - progress);
     };
 
@@ -512,7 +554,9 @@ export function PreviewStage({
       source: CanvasImageSource,
       naturalWidth: number,
       naturalHeight: number,
-      scale: number
+      scale: number,
+      offsetX = 0,
+      offsetY = 0
     ) => {
       if (!naturalWidth || !naturalHeight) return;
       // ffmpeg letterboxes into the frame and then magnifies the whole frame
@@ -524,8 +568,8 @@ export function PreviewStage({
       const height = naturalHeight * fit;
       ctx.drawImage(
         source,
-        (PREVIEW_WIDTH - width) / 2,
-        (PREVIEW_HEIGHT - height) / 2,
+        (PREVIEW_WIDTH - width) / 2 - offsetX * PREVIEW_WIDTH * scale,
+        (PREVIEW_HEIGHT - height) / 2 - offsetY * PREVIEW_HEIGHT * scale,
         width,
         height
       );
@@ -538,14 +582,19 @@ export function PreviewStage({
       time: number,
       index: number
     ) => {
-      drawFitted(ctx, bitmap, bitmap.width, bitmap.height, zoomScale(clip, index, time));
+      const fps = effectSettings.fps;
+      const frameTime = Math.round(time * fps) / fps;
+      const base = zoomScale(clip, index, frameTime);
+      const r = effectsOnStills ? effectSettings.motionRanges?.find(r => frameTime >= Math.round(r.start*fps)/fps && frameTime < Math.round(r.end*fps)/fps) : undefined;
+      const pose = r ? motionPose(r, Math.max(Math.round(clip.start*fps)/fps,Math.round(r.start*fps)/fps), Math.min(Math.round(clip.end*fps)/fps,Math.round(r.end*fps)/fps), frameTime, base) : { scale: base, x: 0, y: 0 };
+      drawFitted(ctx, bitmap, bitmap.width, bitmap.height, pose.scale, pose.x, pose.y);
     };
 
     frame = requestAnimationFrame(render);
     return () => cancelAnimationFrame(frame);
   }, [
-    byId, clips, currentTime, total,
-    zoom, zoomAmount, zoomAmountMotion, film, maxStretch, videoFor,
+    byId, clips, currentTime, total, suspended, effectSettings,
+    zoom, zoomAmount, zoomAmountMotion, narrationZoomAmount, effectsOnStills, effectsOnMotion, film, narrationTransitions, maxStretch, videoFor,
   ]);
 
   const onScrub = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -631,8 +680,8 @@ export function PreviewStage({
         <button type="button" onClick={() => step(-1)} disabled={empty} className="pill">
           ‹ Prev
         </button>
-        <button type="button" onClick={toggle} disabled={empty} className="btn-primary">
-          {playing ? "Pause" : "Play"}
+        <button type="button" onClick={toggle} disabled={empty || suspended} className="btn-primary">
+          {suspended ? "Preview paused during export" : playing ? "Pause" : "Play"}
         </button>
         <button type="button" onClick={() => step(1)} disabled={empty} className="pill">
           Next ›

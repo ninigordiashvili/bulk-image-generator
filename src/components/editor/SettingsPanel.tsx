@@ -10,6 +10,9 @@ import {
   type ZoomDirection,
 } from "@/types/editor";
 
+import { EffectRanges } from "./EffectRanges";
+import { FILM_LABELS } from "@/lib/editor/timedEffects";
+
 interface Props {
   settings: RenderSettings;
   /** Whether any talking clip is loaded — the exemption note only matters then. */
@@ -53,7 +56,20 @@ export function SettingsPanel({
     <div className="space-y-4">
       <div className="panel space-y-3">
         <p className="panel-title">Motion</p>
+        <label className="flex items-center gap-2 text-xs"><input type="checkbox" disabled={disabled} checked={settings.narrationTransitions !== false} onChange={event => onSettings({ narrationTransitions: event.target.checked })} />Short dip to black after narration videos</label>
 
+        <label className="block">
+          <span className="flex items-baseline justify-between text-xs text-muted">
+            <span>Zoom in amount - narration videos</span>
+            <span className="font-mono text-foreground">{Math.round((settings.narrationZoomAmount ?? 0) * 100)}%</span>
+          </span>
+          <input type="range" min={0} max={20} step={1}
+            aria-label="Narration zoom in amount"
+            value={Math.round((settings.narrationZoomAmount ?? 0) * 100)} disabled={disabled}
+            onChange={event => onSettings({ narrationZoomAmount: Number(event.target.value) / 100 })}
+            className="mt-1 w-full accent-[var(--accent)] disabled:opacity-40" />
+          <span className="text-[11px] text-muted">Only videos whose names start with narration. 0% is off; 10% grows from normal size to 110%. Independent of the general zoom below.</span>
+        </label>
         <div className="grid grid-cols-2 gap-2">
           {ZOOM_OPTIONS.map((option) => (
             <button
@@ -120,13 +136,15 @@ export function SettingsPanel({
           </span>
         </label>
 
+        <EffectRanges kind="motion" settings={settings} disabled={disabled} onSettings={onSettings} />
       </div>
 
       <div className="panel space-y-3">
         <p className="panel-title">Film look</p>
+        <p className="text-[11px] text-muted">The selected look applies throughout unless time ranges are enabled.</p>
 
-        <div className="grid grid-cols-4 gap-2">
-          {(["off", "subtle", "medium", "heavy"] as FilmLook[]).map((look) => (
+        <div className="grid grid-cols-2 gap-2">
+          {(Object.keys(FILM_LABELS) as FilmLook[]).map((look) => (
             <button
               key={look}
               type="button"
@@ -134,16 +152,18 @@ export function SettingsPanel({
               onClick={() => onSettings({ film: look })}
               className={`pill capitalize ${settings.film === look ? "pill-active" : ""}`}
             >
-              {look}
+              {FILM_LABELS[look]}
             </button>
           ))}
         </div>
 
         <p className="text-[11px] text-muted">
-          Grain that moves with the frame, a slight flicker, vignette and faded
+          Subtle, medium and heavy film add moving grain, a slight flicker, vignette and faded
           highlights — no frame shake. Heavier settings grow the file: grain is
           noise, and noise is what the encoder spends bits on.
         </p>
+
+        <EffectRanges kind="film" settings={settings} disabled={disabled} onSettings={onSettings} />
 
         <div className="space-y-1.5 border-t border-line pt-2">
           <p className="text-[11px] text-muted">Apply the look and the zoom to:</p>
@@ -169,10 +189,8 @@ export function SettingsPanel({
             {!hasMotion && <span className="text-muted">— none loaded</span>}
           </label>
           <p className="text-[11px] text-muted">
-            Talking clips never take either.{" "}
-            {hasAvatars
-              ? "A zoom on a speaking face reads as a mistake, and grain fights the one thing the viewer is trying to read."
-              : ""}
+            Narration videos use their own zoom amount above.
+            {hasAvatars ? " Other talking clips stay free of zoom and film effects." : ""}
           </p>
         </div>
       </div>
@@ -216,6 +234,25 @@ export function SettingsPanel({
               </option>
             ))}
           </select>
+        </label>
+
+        <label className="block">
+          <span className="text-xs text-muted">Video bitrate</span>
+          <select
+            className="field mt-1"
+            disabled={disabled}
+            value={settings.videoBitrateKbps ?? 0}
+            onChange={(event) => onSettings({ videoBitrateKbps: Number(event.target.value) })}
+          >
+            <option value={0}>Automatic quality</option>
+            <option value={6000}>6,000 kbps (6 Mbps)</option>
+            <option value={8000}>8,000 kbps (8 Mbps)</option>
+            <option value={10000}>10,000 kbps (10 Mbps)</option>
+          </select>
+          <span className="text-[11px] text-muted">
+            Target average bitrate. Actual bitrate varies with the images and effects.
+            Higher values generally produce larger files.
+          </span>
         </label>
 
         <label className="block">

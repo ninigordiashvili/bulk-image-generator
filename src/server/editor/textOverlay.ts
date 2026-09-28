@@ -1,3 +1,4 @@
+import { textPhases } from "@/lib/editor/textAnimation";
 import { existsSync } from "node:fs";
 import { displayText, styleOf } from "@/lib/editor/textStyles";
 import type { TextMoment } from "@/types/editor";
@@ -100,6 +101,7 @@ const fixed = (value: number) => value.toFixed(3);
  * the preview shows the text somewhere the export will not put it.
  */
 function travelOffset(animation: TextMoment["animation"]): number | null {
+  if (animation === "gentle") return 0.035;
   if (animation === "rise") return 0.2;
   if (animation === "drop") return -0.2;
   return null;
@@ -178,6 +180,7 @@ export function momentChain(
 
   const look = styleOf(moment.style);
   const font = fontFileFor(look.files);
+  if (!font) throw new Error(`No font installed for ${look.label}.`);
   // Sizes are whole pixels, worked out from the output height here: drawtext
   // takes expressions for x, y and alpha, but `fontsize`, `borderw` and
   // `shadowy` are plain integers and reject one.
@@ -185,26 +188,29 @@ export function momentChain(
   const border = look.rim > 0 ? Math.max(1, Math.round(height * look.rim)) : 0;
   const shadow = look.shadow > 0 ? Math.max(1, Math.round(height * look.shadow)) : 0;
 
-  parts.push(
-    [
-      "drawtext=",
-      font ? `fontfile='${font}':` : "",
-      `text='${escapeDrawText(displayText(moment.text, moment.style))}'`,
-      `:fontsize=${fontSize}`,
-      `:fontcolor=0x${look.colour}`,
-      // A dark rim keeps it legible over a bright frame without a solid box —
-      // the styles that use a box instead ask for no rim.
-      border > 0 ? `:borderw=${border}:bordercolor=black@${look.rimAlpha}` : "",
-      shadow > 0 ? `:shadowx=0:shadowy=${shadow}:shadowcolor=black@${look.shadowAlpha}` : "",
-      look.box
-        ? `:box=1:boxcolor=black@${look.boxAlpha}:boxborderw=${Math.round(fontSize * 0.35)}`
-        : "",
-      `:x=(w*${restX.toFixed(4)}-text_w/2)`,
-      `:y='${y}'`,
-      `:alpha='${alpha}'`,
-      `:enable='between(t,${fixed(start)},${fixed(end)})'`,
-    ].join("")
-  );
+  for (const phase of textPhases(moment)) {
+    parts.push(
+      [
+        "drawtext=",
+        font ? `fontfile='${font.replace(/:/g, "\\:")}':` : "",
+        `text='${escapeDrawText(displayText(phase.text, moment.style))}'`,
+        `:fontsize=${fontSize}`,
+        `:fontcolor=0x${look.colour}`,
+        // A dark rim keeps it legible over a bright frame without a solid box —
+        // the styles that use a box instead ask for no rim.
+        border > 0 ? `:borderw=${border}:bordercolor=black@${look.rimAlpha}` : "",
+        shadow > 0 ? `:shadowx=0:shadowy=${shadow}:shadowcolor=black@${look.shadowAlpha}` : "",
+        look.box
+          ? `:box=1:boxcolor=black@${look.boxAlpha}:boxborderw=${Math.round(fontSize * 0.35)}`
+          : "",
+        `:x=(w*${restX.toFixed(4)}-text_w/2+${(phase.offset * fontSize).toFixed(3)})`,
+        `:y='${y}'`,
+        `:alpha='${alpha}'`,
+        `:enable='gte(t,${(start + phase.from).toFixed(6)})*lt(t,${(start + phase.to).toFixed(6)})'`,
+      ].join("")
+    );
+
+  }
 
   return parts;
 }
@@ -298,12 +304,16 @@ export function scrimGraph(
       // -2 keeps the plate's own aspect at an even height, which the encoder
       // needs; a stated height overrides it.
       `scale=${frameWidth}:${bandPx ?? -2}:flags=bicubic`,
+      // Evaluate fades on the project clock, then restore segment timestamps.
+      // A fade can already be in progress when this clip begins.
+      `setpts=PTS+${segmentStart}/TB`,
       fade.in > 0.001
-        ? `fade=t=in:st=${fixed(Math.max(0, start))}:d=${fixed(fade.in)}:alpha=1`
+        ? `fade=t=in:st=${fixed(moment.start)}:d=${fixed(fade.in)}:alpha=1`
         : "",
       fade.out > 0.001
-        ? `fade=t=out:st=${fixed(end - fade.out)}:d=${fixed(fade.out)}:alpha=1`
+        ? `fade=t=out:st=${fixed(moment.start + moment.duration - fade.out)}:d=${fixed(fade.out)}:alpha=1`
         : "",
+      `setpts=PTS-${segmentStart}/TB`,
       // `fade` ramps alpha to full; this scales the plate down to the opacity
       // asked for without flattening the gradient inside it.
       opacity < 0.999 ? `colorchannelmixer=aa=${opacity.toFixed(3)}` : "",

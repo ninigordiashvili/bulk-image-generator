@@ -1,4 +1,5 @@
 "use client";
+import { HelpTip } from "./HelpTip";
 
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -135,6 +136,7 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
         <h2 className="panel-title mb-0">
           Prompts — {tagged.length > 0 ? "one per #cue" : "one per line"}
         </h2>
+        <button type="button" disabled={disabled || !promptText} onClick={() => setPromptText("")} className="text-xs text-muted hover:text-foreground disabled:opacity-40">Clear all</button>
         <span
           className={`text-xs ${overPromptLimit ? "text-red-400" : "text-muted"}`}
         >
@@ -243,7 +245,7 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
           overRefLimit === 0 &&
           issues.empty.length === 0 &&
           issues.duplicates.length === 0 && (
-            <p className="text-muted">
+            <HelpTip label="Prompt format">
               {tagged.length > 0 ? (
                 <>
                   Each <span className="font-mono text-emerald-400">#cue</span>{" "}
@@ -262,7 +264,7 @@ export function BulkPromptInput({ disabled }: { disabled: boolean }) {
                   prompt on the same line or the next one, whichever you prefer.
                 </>
               )}
-            </p>
+            </HelpTip>
           )}
       </div>
     </section>

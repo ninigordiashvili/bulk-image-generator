@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { WorkTiming } from "./WorkTiming";
 import { creditsPerImage, formatCredits, formatSpend } from "@/lib/pricing";
 import { parsePrompts } from "@/lib/prompts";
 import {
@@ -9,8 +10,11 @@ import {
   useGenerationStore,
 } from "@/store/generationStore";
 import { MAX_PROMPTS } from "@/types";
+import { imageRate } from "@/lib/vertexPricing";
+import { VERTEX_BATCH_IMAGE_USD } from "@/lib/vertexBatch";
 
 export function GenerationProgress() {
+  const backgroundStatus = useGenerationStore((state) => state.backgroundStatus);
   const progress = useGenerationStore((state) => state.progress);
   const queueState = useGenerationStore((state) => state.queueState);
   const promptText = useGenerationStore((state) => state.promptText);
@@ -44,6 +48,7 @@ export function GenerationProgress() {
 
   return (
     <section className="panel">
+      <WorkTiming status={backgroundStatus} />
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="panel-title mb-0">
           {queueState === "running"
@@ -65,12 +70,14 @@ export function GenerationProgress() {
         />
       </div>
 
-      <p className="mt-2 text-xs text-muted">
+      {settings.provider === "vertex" ? <p className="mt-2 text-xs text-muted">
+        Estimated completed image output: ${(progress.succeeded * (backgroundStatus?.execution === "vertex-batch" ? VERTEX_BATCH_IMAGE_USD : imageRate(model).usd)).toFixed(4)}. Input and other charges are additional; refresh the account estimate after completion.
+      </p> : <p className="mt-2 text-xs text-muted">
         Spent so far{" "}
         <span className="font-semibold text-foreground">{formatSpend(spent)}</span>
         {estimated !== null && <> of {formatCredits(estimated)} estimated</>} for
         this batch.
-      </p>
+      </p>}
     </section>
   );
 }

@@ -3,8 +3,8 @@ import {
   VertexError,
   generateImages,
   generateVideo,
-  vertexTarget,
 } from "@/server/vertex";
+import { findVideoModel } from "@/lib/videoModels";
 import { findVertexImageModel, findVertexVideoModel } from "@/lib/vertexModels";
 import { VertexAccountError, findVertexAccount } from "@/server/vertexAccounts";
 import { classifyResolution, readImageDimensions } from "@/lib/imageMeta";
@@ -22,6 +22,7 @@ interface VertexGenerateBody {
   /** Which Google account pays. Omitted uses the first configured. */
   accountId?: string;
   kind?: "image" | "video";
+  requestId?: string;
   model?: string;
   prompt?: string;
   styleBible?: string;
@@ -40,6 +41,7 @@ interface VertexGenerateBody {
   outputGcsUri?: string;
   /** Base64 still for the image-to-video models, without a data: prefix. */
   image?: { base64?: string; mimeType?: string };
+  referenceImages?: { label?: string; base64: string; mimeType: string }[];
 }
 
 function fail(error: string, status = 400, retryable = false) {
@@ -55,21 +57,16 @@ export async function POST(request: Request) {
   }
 
   const kind = body.kind ?? "image";
-  const model = body.model?.trim();
+  const selectedModel = body.model?.trim();
+  // Video batches store UI IDs; Vertex endpoints require the provider model ID.
+  const videoSpec = kind === "video" && selectedModel ? findVideoModel(selectedModel) : undefined;
+  const model = videoSpec?.provider === "vertex" ? videoSpec.requestModel : selectedModel;
   const prompt = [body.styleBible?.trim(), body.prompt?.trim()]
     .filter(Boolean)
     .join("\n");
 
   if (!model) return fail("No model selected.");
   if (!prompt) return fail("Prompt is empty.");
-
-  const { project } = vertexTarget();
-  if (!project) {
-    return fail(
-      "No Google Cloud project configured. Set GOOGLE_CLOUD_PROJECT in .env.local.",
-      500
-    );
-  }
 
   // The client can send any id — the catalog is a convenience, not a gate, so an
   // unlisted model still reaches Vertex. What the lookup buys is catching a
@@ -101,6 +98,7 @@ export async function POST(request: Request) {
 
       const videos = await generateVideo({
         account,
+        requestId: typeof body.requestId === "string" ? body.requestId.slice(0, 200) : undefined,
         model,
         prompt,
         image: still,
@@ -123,6 +121,7 @@ export async function POST(request: Request) {
       aspectRatio: body.aspectRatio,
       imageSize: body.imageSize,
       negativePrompt: body.negativePrompt,
+      referenceImages: body.referenceImages,
       seed: body.seed,
       signal,
     });

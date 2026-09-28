@@ -1,4 +1,9 @@
 "use client";
+import { HelpTip } from "./HelpTip";
+
+import { HeygenSettings } from "./HeygenSettings";
+import { heygenEstimate } from "@/lib/heygen";
+import { WorkTiming } from "./WorkTiming";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadShotImage } from "@/lib/imageFile";
@@ -15,9 +20,16 @@ import { isRunnable, shotSize, useVideoStore } from "@/store/videoStore";
 import { MAX_CONCURRENCY, MAX_SHOTS } from "@/types";
 import { VideoGallery } from "./VideoGallery";
 import { VideoShotRow } from "./VideoShotRow";
+import { VideoPromptInput } from "./VideoPromptInput";
+import { pendingVideoShots } from "@/lib/videoPrompts";
 
 export function VideoBatch() {
+  const addAvatarShots = useVideoStore(state => state.addAvatarShots);
+  const [avatarRows, setAvatarRows] = useState(1);
   const shots = useVideoStore((state) => state.shots);
+  const inputMode = useVideoStore(state => state.inputMode);
+  const setInputMode = useVideoStore(state => state.setInputMode);
+  const promptText = useVideoStore(state => state.promptText);
   const defaults = useVideoStore((state) => state.defaults);
   const setDefaults = useVideoStore((state) => state.setDefaults);
   const updateShot = useVideoStore((state) => state.updateShot);
@@ -25,8 +37,8 @@ export function VideoBatch() {
   const progress = useVideoStore((state) => state.progress);
   const queueState = useVideoStore((state) => state.queueState);
   const haltReason = useVideoStore((state) => state.haltReason);
+  const backgroundStatus = useVideoStore((state) => state.backgroundStatus);
   const concurrency = useVideoStore((state) => state.concurrency);
-  const retries = useVideoStore((state) => state.retries);
   const creditRates = useVideoStore((state) => state.creditRates);
 
   const addShots = useVideoStore((state) => state.addShots);
@@ -47,10 +59,10 @@ export function VideoBatch() {
     [defaults.model, shots]
   );
   const setConcurrency = useVideoStore((state) => state.setConcurrency);
-  const setRetries = useVideoStore((state) => state.setRetries);
   const startGeneration = useVideoStore((state) => state.startGeneration);
   const cancelGeneration = useVideoStore((state) => state.cancelGeneration);
   const retryFailedJobs = useVideoStore((state) => state.retryFailedJobs);
+  const retryJob = useVideoStore(state => state.retryJob);
   const hydrateGallery = useVideoStore((state) => state.hydrateGallery);
 
   // The video tab's own account gates starting a video run.
@@ -94,8 +106,10 @@ export function VideoBatch() {
 
   // What "ready" means depends on the row's model: a prompt for the animators,
   // a voice cut for the avatars.
-  const ready = shots.filter(isRunnable);
-  const notReady = shots.length - ready.length;
+  const textMode = provider === "vertex" && inputMode === "text";
+  const pending = pendingVideoShots({ provider, inputMode, promptText, shots, defaults });
+  const ready = pending.filter(isRunnable);
+  const notReady = pending.length - ready.length;
 
   // Each row can be a different model at a different length, so the estimate is
   // a sum over rows rather than count × rate. Rows on a model that has never run
@@ -151,9 +165,105 @@ export function VideoBatch() {
 
   return (
     <div className="space-y-4">
+      <section className="panel space-y-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={running || ready.length === 0 || pending.length > MAX_SHOTS || !accountId}
+            onClick={startGeneration}
+          >
+            Generate {ready.length > 0 ? `${ready.length} videos` : "videos"}
+          </button>
+
+          {running && (
+            <button type="button" className="btn-ghost" onClick={cancelGeneration}>
+              {queueState === "cancelling" ? "Cancelling…" : "Cancel run"}
+            </button>
+          )}
+
+          {unfinished > 0 && !running && (
+            <button type="button" className="btn-ghost" onClick={retryFailedJobs}>
+              Retry {unfinished} failed
+            </button>
+          )}
+
+          <div role="group" aria-label="Video settings" className="contents">
+          <label className="flex items-center gap-1.5 text-[11px] text-muted">Model <select aria-label={textMode ? "Model" : "Batch model"} className="field w-auto max-w-full px-2 py-1 text-xs" disabled={running} value={defaults.model} onChange={event => (textMode ? setDefaults : applyToAll)({ model: event.target.value })}>
+            {videoModelsFor(provider).map(model => <option key={model.id} value={model.id}>{model.label}</option>)}
+          </select></label>
+          {provider !== "heygen" && videoModel(defaults.model).durations.length > 0 && <label className="flex items-center gap-1.5 text-[11px] text-muted">Duration <select aria-label={textMode ? "Duration" : "Batch duration"} className="field w-auto max-w-full px-2 py-1 text-xs" disabled={running} value={defaults.duration} onChange={event => (textMode ? setDefaults : applyToAll)({ duration: Number(event.target.value) })}>
+            {videoModel(defaults.model).durations.map(value => <option key={value} value={value}>{value}s</option>)}
+          </select></label>}
+          {provider !== "heygen" && videoModel(defaults.model).resolutions.length > 0 && <label className="flex items-center gap-1.5 text-[11px] text-muted">Resolution <select aria-label={textMode ? "Resolution" : "Batch resolution"} className="field w-auto max-w-full px-2 py-1 text-xs" disabled={running} value={defaults.resolution} onChange={event => (textMode ? setDefaults : applyToAll)({ resolution: event.target.value })}>
+            {videoModel(defaults.model).resolutions.map(value => <option key={value}>{value}</option>)}
+          </select></label>}
+          {provider !== "heygen" && videoModel(defaults.model).aspectRatios.length > 0 && <label className="flex items-center gap-1.5 text-[11px] text-muted">Ratio <select aria-label={textMode ? "Ratio" : "Batch ratio"} className="field w-auto max-w-full px-2 py-1 text-xs" disabled={running} value={defaults.aspectRatio} onChange={event => (textMode ? setDefaults : applyToAll)({ aspectRatio: event.target.value })}>
+            {videoModel(defaults.model).aspectRatios.map(value => <option key={value}>{value}</option>)}
+          </select></label>}
+            <HelpTip label="Batch settings">{textMode ? "Settings apply to every video prompt." : "Changes apply to all current shots and new images. Individual shots can override these settings."}</HelpTip>
+          </div>
+
+          <label className="flex items-center gap-1.5 text-[11px] text-muted">
+            At once
+            <input
+              type="number"
+              className="field w-16 px-2 py-1 text-xs"
+              min={1}
+              max={MAX_CONCURRENCY}
+              value={concurrency}
+              onChange={(event) =>
+                setConcurrency(
+                  Math.min(MAX_CONCURRENCY, Math.max(1, Number(event.target.value) || 1))
+                )
+              }
+            />
+          </label>
+          <HelpTip label="Retries and quota waits">{provider === "heygen" ? "HeyGen quota waits and temporary connection errors retry safely. Accepted videos resume by ID. Use Retry on a failed row." : "Vertex quota errors wait and keep retrying until success or cancellation. Other failed prompts retry once automatically. After that, use Retry on the failed row."}</HelpTip>
+
+          {!accountId && (
+            <span className="text-xs text-amber-400">
+              Select an account for this video batch.
+            </span>
+          )}
+        </div>
+        {provider === "kie" && <p className="text-[11px] text-muted">
+          {estimate.known > 0 && (
+            <>
+              Estimated{" "}
+              <span
+                className={
+                  credits !== null && estimate.known > credits
+                    ? "font-semibold text-amber-400"
+                    : "font-semibold text-foreground"
+                }
+              >
+                {formatCredits(estimate.known)}
+              </span>{" "}
+              (~{formatUsd(creditsToUsd(estimate.known))}) for this batch.{" "}
+            </>
+          )}
+          {estimate.unknown > 0 && <span>{estimate.unknown} unpriced rows. </span>}
+          <HelpTip label="Video estimate">Costs are estimates based on recorded model rates. Unpriced rows are excluded until their first successful generation.</HelpTip>
+        </p>}
+        {provider === "heygen" && <p className="text-xs text-muted">Estimated <strong className="text-foreground">&#36;{heygenEstimate(ready.reduce((sum, shot) => sum + (shot.audio?.duration ?? 0), 0)).toFixed(2)}</strong> for {ready.length} videos <HelpTip label="HeyGen estimate">$1/minute, based on selected audio cuts. This is your configured estimate, not a provider quote.</HelpTip></p>}
+      </section>
+
+      {provider === "vertex" && <div className="flex gap-2" role="group" aria-label="Video input mode">
+        <button className="pill" aria-pressed={textMode} disabled={running} onClick={() => setInputMode("text")}>Text to video</button>
+        <button className="pill" aria-pressed={!textMode} disabled={running} onClick={() => setInputMode("images")}>Image to video</button>
+      </div>}
+      {provider === "heygen" && <section className="panel space-y-3">
+        <h2 className="panel-title">HeyGen batch defaults</h2>
+        <HeygenSettings model={defaults.model} resolution={defaults.resolution} aspectRatio={defaults.aspectRatio} options={defaults.heygen} disabled={running} onChange={patch => applyToAll(patch)} />
+        {defaults.heygen?.source === "avatar" && <div className="flex items-center gap-2"><input aria-label="Number of avatar rows" className="field w-20" type="number" min={1} max={MAX_SHOTS} value={avatarRows} disabled={running} onChange={e => setAvatarRows(Math.max(1, Math.min(MAX_SHOTS, Number(e.target.value) || 1)))} /><button className="btn-ghost" disabled={running || shots.length >= MAX_SHOTS} onClick={() => addAvatarShots(avatarRows)}>Add avatar rows</button></div>}
+        <HelpTip label="HeyGen batch settings">Changes here apply to all rows and new images. Each row can override these settings and trim its own audio.</HelpTip>
+      </section>}
+      {textMode ? <VideoPromptInput disabled={running} /> : <>
       <section className="panel">
         <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="panel-title mb-0">Storyboard</h2>
+          <button type="button" className="btn-ghost text-xs" disabled={running || shots.length === 0} onClick={clearShots}>Clear all</button>
           <span className="text-[11px] text-muted">
             {shots.length} / {MAX_SHOTS} shots
             {notReady > 0 && (
@@ -186,7 +296,7 @@ export function VideoBatch() {
           <span className="text-muted">
             {loading
               ? "Reading images…"
-              : "Drop images here — one shot per image. Select all ten at once; each gets its own prompt, model, duration and resolution below."}
+              : "Drop images here or click to browse"}
           </span>
         </div>
 
@@ -276,58 +386,6 @@ export function VideoBatch() {
 
         {shots.length > 0 && (
           <>
-            {/* Setting ten rows by hand is the tedious part; this is the shortcut. */}
-            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2">
-              <span className="text-[11px] text-muted">Apply to all rows:</span>
-              {videoModelsFor(provider).map((model) => (
-                <button
-                  key={model.id}
-                  type="button"
-                  className="pill px-2 py-0.5 text-[11px]"
-                  disabled={running}
-                  onClick={() => applyToAll({ model: model.id })}
-                  title={model.blurb}
-                >
-                  {model.label}
-                </button>
-              ))}
-              {videoModel(defaults.model).durations.length > 0 && (
-                <span className="mx-1 text-line">|</span>
-              )}
-              {videoModel(defaults.model).durations.map((duration) => (
-                <button
-                  key={duration}
-                  type="button"
-                  className="pill px-2 py-0.5 text-[11px]"
-                  disabled={running}
-                  onClick={() => applyToAll({ duration })}
-                >
-                  {duration}s
-                </button>
-              ))}
-              {videoModel(defaults.model).resolutions.length > 0 && (
-                <span className="mx-1 text-line">|</span>
-              )}
-              {videoModel(defaults.model).resolutions.map((resolution) => (
-                <button
-                  key={resolution}
-                  type="button"
-                  className="pill px-2 py-0.5 text-[11px]"
-                  disabled={running}
-                  onClick={() => applyToAll({ resolution })}
-                >
-                  {resolution}
-                </button>
-              ))}
-              <button
-                type="button"
-                className="btn-ghost ml-auto text-[11px]"
-                disabled={running}
-                onClick={clearShots}
-              >
-                Clear all
-              </button>
-            </div>
 
             <ul className="mt-3 space-y-2">
               {shots.map((shot, index) => (
@@ -343,93 +401,9 @@ export function VideoBatch() {
           </>
         )}
       </section>
-
-      <section className="panel space-y-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            className="btn-primary"
-            disabled={running || ready.length === 0 || !accountId}
-            onClick={startGeneration}
-          >
-            Generate {ready.length > 0 ? `${ready.length} videos` : "videos"}
-          </button>
-
-          {running && (
-            <button type="button" className="btn-ghost" onClick={cancelGeneration}>
-              {queueState === "cancelling" ? "Cancelling…" : "Cancel run"}
-            </button>
-          )}
-
-          {unfinished > 0 && !running && (
-            <button type="button" className="btn-ghost" onClick={retryFailedJobs}>
-              Retry {unfinished} failed
-            </button>
-          )}
-
-          <label className="flex items-center gap-1.5 text-[11px] text-muted">
-            At once
-            <input
-              type="number"
-              className="field w-16 px-2 py-1 text-xs"
-              min={1}
-              max={MAX_CONCURRENCY}
-              value={concurrency}
-              onChange={(event) =>
-                setConcurrency(
-                  Math.min(MAX_CONCURRENCY, Math.max(1, Number(event.target.value) || 1))
-                )
-              }
-            />
-          </label>
-          <label className="flex items-center gap-1.5 text-[11px] text-muted">
-            Retries
-            <input
-              type="number"
-              className="field w-16 px-2 py-1 text-xs"
-              min={0}
-              max={5}
-              value={retries}
-              onChange={(event) =>
-                setRetries(Math.min(5, Math.max(0, Number(event.target.value) || 0)))
-              }
-            />
-          </label>
-
-          {!accountId && (
-            <span className="text-xs text-amber-400">
-              Select a kie.ai account in the Images tab first.
-            </span>
-          )}
-        </div>
-
-        <p className="text-[11px] text-muted">
-          {estimate.known > 0 && (
-            <>
-              Estimated{" "}
-              <span
-                className={
-                  credits !== null && estimate.known > credits
-                    ? "font-semibold text-amber-400"
-                    : "font-semibold text-foreground"
-                }
-              >
-                {formatCredits(estimate.known)}
-              </span>{" "}
-              (~{formatUsd(creditsToUsd(estimate.known))}) for this batch.{" "}
-            </>
-          )}
-          {estimate.unknown > 0 && (
-            <>
-              {estimate.unknown} row{estimate.unknown === 1 ? "" : "s"} use a model
-              that hasn&apos;t run here yet, so {estimate.unknown === 1 ? "its" : "their"}{" "}
-              cost is unknown until the first clip finishes.{" "}
-            </>
-          )}
-          Video takes minutes per clip — {concurrency} run at a time, so the batch
-          finishes in roughly the time of the slowest {concurrency}.
-        </p>
-
+      </>}
+      {(backgroundStatus || jobs.length > 0 || haltReason) && <section className="panel space-y-3">
+        <WorkTiming status={backgroundStatus} />
         {jobs.length > 0 && (
           <>
             <div className="h-2 overflow-hidden rounded-full bg-surface-2">
@@ -444,6 +418,14 @@ export function VideoBatch() {
             </p>
           </>
         )}
+        {textMode && jobs.length > 0 && <ul className="max-h-72 space-y-2 overflow-auto text-xs">
+          {jobs.map(job => <li key={job.id} className="rounded border border-line p-2">
+            <div className="flex items-center justify-between gap-2"><span>{job.tag ?? job.promptIndex + 1}.mp4 - {job.status}</span>
+              {["error", "cancelled"].includes(job.status) && !running && <button className="text-accent underline" onClick={() => retryJob(job.id)}>Retry</button>}
+            </div>
+            {job.error && <p className="mt-1 text-red-400">{job.error}</p>}
+          </li>)}
+        </ul>}
 
         {haltReason && (
           <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2.5">
@@ -455,7 +437,7 @@ export function VideoBatch() {
             </p>
           </div>
         )}
-      </section>
+      </section>}
 
       <VideoGallery />
     </div>

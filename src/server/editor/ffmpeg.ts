@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
+import { promises as fs } from "node:fs";
 import ffmpegStatic from "ffmpeg-static";
 import ffprobeStatic from "ffprobe-static";
 
@@ -41,7 +44,7 @@ export interface RunOptions {
  * Runs a binary to completion. stderr is kept but capped — a failing ffmpeg can
  * emit a megabyte of repeated frame warnings, and only the tail ever says why.
  */
-export function run(
+function spawnRun(
   bin: string,
   args: string[],
   options: RunOptions = {}
@@ -53,7 +56,11 @@ export function run(
       return;
     }
 
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    // Let interactive work take precedence; unsupported priority changes are harmless.
+    if (child.pid) {
+      try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch {}
+    }
     let stdout = "";
     let stderr = "";
     let pending = "";
@@ -95,6 +102,29 @@ export function run(
       }
     });
   });
+}
+
+/** Windows limits command length; large effect schedules use temporary filter files. */
+export async function run(bin: string, args: string[], options: RunOptions = {}): Promise<RunResult> {
+  if (options.signal?.aborted) throw new Error('Cancelled.');
+  if (bin !== FFMPEG || args.join(' ').length < 20000) return spawnRun(bin, args, options);
+  const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'bulk-filter-'));
+  const files: string[] = [];
+  try {
+    const shortened = [...args];
+    for (let i = 0; i < shortened.length - 1; i++) {
+      if (shortened[i] !== '-vf' && shortened[i] !== '-filter_complex') continue;
+      const file = path.join(folder, 'filter-' + i + '.txt');
+      files.push(file);
+      await fs.writeFile(file, shortened[i + 1], 'utf8');
+      shortened[i] = shortened[i] === '-vf' ? '-filter_script:v' : '-filter_complex_script';
+      shortened[++i] = file;
+    }
+    return await spawnRun(bin, shortened, options);
+  } finally {
+    await Promise.all(files.map(file => fs.unlink(file).catch(() => {})));
+    await fs.rmdir(folder).catch(() => {});
+  }
 }
 
 /** Container duration in seconds, or 0 when the file has none ffprobe can read. */

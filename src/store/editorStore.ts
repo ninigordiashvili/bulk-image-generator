@@ -1,5 +1,6 @@
 "use client";
 
+import { clipZoomSettings } from "@/lib/editor/clipEffects";
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { analyseClip, classify, type Envelope } from "@/lib/editor/analyse";
@@ -573,6 +574,7 @@ export const useEditorStore = create<EditorStore>()(
         set({ export: { ...IDLE_EXPORT, phase: "uploading" } });
 
         let jobId: string | null = null;
+        let renderSubmitted = false;
 
         try {
           const created = (await postJson("/api/editor/job", null, controller.signal)) as
@@ -660,12 +662,12 @@ export const useEditorStore = create<EditorStore>()(
             return {
               file: clip.sourceId ? (stored.get(clip.sourceId) ?? null) : null,
               kind: clip.kind,
+              label: clip.label,
               start: clip.start,
               end: clip.end,
-              // Neither the move nor the look goes near a talking face. The
-              // amount differs by kind and is resolved server-side.
-              zoom: clip.sourceId && !avatar && effects ? clipZoom(state.zoom, index) : "none",
-              film: Boolean(clip.sourceId) && effects && state.settings.film !== "off",
+              // Narration zoom is independent; other talking clips remain still.
+              zoom: clip.sourceId ? clipZoomSettings(clip, clipZoom(state.zoom, index), state.settings).direction : "none",
+              film: Boolean(clip.sourceId) && effects && (state.settings.film !== "off" || Boolean(state.settings.filmRangesEnabled)),
               sourceSeconds: avatar
                 ? (source?.speechEnd ?? source?.duration ?? undefined)
                 : source?.duration ?? undefined,
@@ -696,6 +698,7 @@ export const useEditorStore = create<EditorStore>()(
             })),
           };
 
+          renderSubmitted = true;
           const started = (await postJson(
             `/api/editor/job/${jobId}/render`,
             request,
@@ -735,13 +738,17 @@ export const useEditorStore = create<EditorStore>()(
               export: {
                 ...current.export,
                 phase: "error",
-                error: error instanceof Error ? error.message : "The export failed.",
+                error: renderSubmitted && jobId
+                  ? `Connection to the export was lost. Open Activity to view it; it may still be rendering. ${error instanceof Error ? error.message : ""}`
+                  : error instanceof Error ? error.message : "The export failed.",
               },
             }));
           }
           // A failed or abandoned job is a few hundred megabytes of scratch
           // files; there's no reason to leave them for the sweeper.
-          if (jobId) void discard(jobId);
+          // A lost POST response or polling connection does not cancel a render.
+          // Its server-owned controller is stopped only by explicit Cancel.
+          if (jobId && (!renderSubmitted || controller.signal.aborted)) void discard(jobId);
         } finally {
           if (exportAbort === controller) exportAbort = null;
         }

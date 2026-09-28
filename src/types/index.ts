@@ -18,11 +18,16 @@ export type TaskInput = Record<string, InputValue | string[]>;
  */
 /** Which backend an account belongs to. */
 export type Provider = "kie" | "vertex";
+export type VideoProvider = Provider | "heygen";
 
 export interface KieAccount {
   id: string;
   label: string;
   keyHint: string;
+  usage?: {
+    spentUsd: number; remainingUsd: number | null; startingCreditUsd: number | null;
+    since: number | null; ratesUnverified: boolean; error?: string;
+  };
   /** Set when the account list is merged in the store; absent from the wire. */
   provider?: Provider;
   /**
@@ -89,6 +94,7 @@ export interface CharacterRef {
 export const CUSTOM_MODEL = "__custom__";
 
 export interface GenerationSettings {
+  vertexImageMode?: "standard" | "batch";
   /**
    * Chosen by picking an account, not by picking a model. The account is the
    * thing that holds the credit and the quota, so it decides which models are
@@ -127,6 +133,9 @@ export interface QueueConfig {
  * results stored before this existed have none, and fall back to `createdAt`.
  */
 export interface GalleryOrderKeys {
+  downloadedAt?: number;
+  workId?: string;
+  workIndex?: number;
   id: string;
   createdAt: number;
   /** The run this belongs to — groups a batch together. */
@@ -317,9 +326,12 @@ export interface ShotAudio {
  * mix durations and resolutions, because each row is a separate kie task.
  */
 export interface VideoShot {
+  heygen?: import("@/lib/heygen").HeygenOptions;
   id: string;
-  image: ShotImage;
+  /** Omitted for Vertex text-to-video. */
+  image?: ShotImage;
   prompt: string;
+  tag?: string;
   /** Required by audio-driven models, ignored by the others. */
   audio?: ShotAudio;
   model: string;
@@ -353,6 +365,8 @@ export interface GeneratedVideo extends GalleryOrderKeys {
   posterMimeType: string;
   createdAt: number;
   credits: number;
+  /** Vertex's estimated dollar cost; separate from kie.ai credits. */
+  estimatedUsd?: number;
   /** True when kie reported no figure and this is our own rate estimate. */
   creditsEstimated?: boolean;
   taskId: string;
@@ -362,10 +376,11 @@ export interface GeneratedVideo extends GalleryOrderKeys {
 
 /** POST /api/kie/video/start request body. */
 export interface VideoStartRequest {
+  heygen?: import("@/lib/heygen").HeygenOptions;
   accountId: string;
   model: string;
   prompt: string;
-  image: { base64: string; mimeType: string };
+  image?: { base64: string; mimeType: string };
   duration: number;
   resolution: string;
   aspectRatio: string;
@@ -407,7 +422,7 @@ export type VideoStatusResponse =
       /** Resolution kie reports back, which can differ from the request. */
       actualResolution?: string;
     }
-  | { ok: false; error: string; retryable?: boolean };
+  | { ok: false; error: string; retryable?: boolean; taskFailed?: boolean };
 
 export const MAX_SHOTS = 100;
 

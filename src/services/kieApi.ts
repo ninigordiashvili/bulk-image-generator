@@ -75,6 +75,7 @@ async function generateImageOnVertex(
         model: request.model,
         prompt: request.prompt,
         styleBible: request.styleBible,
+        referenceImages: request.referenceImages,
         aspectRatio: asString(input.aspect_ratio),
         imageSize: asString(input.image_size),
         count: 1,
@@ -123,6 +124,7 @@ async function generateImageOnVertex(
 export async function generateVideoOnVertex(
   request: {
     accountId: string;
+    requestId?: string;
     model: string;
     prompt: string;
     image?: { base64: string; mimeType: string };

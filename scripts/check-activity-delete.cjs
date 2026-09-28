@@ -1,0 +1,66 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const Module = require('node:module');
+const ts = require('typescript');
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'activity-delete-check-'));
+process.env.WORK_ROOT = path.join(scratch, 'work');
+process.env.EDITOR_WORK_ROOT = path.join(scratch, 'editor');
+const root = path.resolve(__dirname, '..');
+const resolve = Module._resolveFilename;
+Module._resolveFilename = function(name, ...args) { return resolve.call(this, name.startsWith('@/') ? path.join(root, 'src', name.slice(2)) : name, ...args); };
+require.extensions['.ts'] = (module, file) => module._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true } }).outputText, file);
+const load = Module._load;
+Module._load = function(name, ...args) { if (name === './workProvider') return { performWork: async () => { throw Error('No generation allowed'); } }; return load.call(this, name, ...args); };
+async function main() {
+  const work = require('../src/server/work.ts');
+  const jobs = require('../src/server/editor/jobs.ts');
+  const route = require('../src/app/api/activity/route.ts');
+  const id = '12345678-1234-1234-1234-123456789abc';
+  await work.createWork({ id, kind: 'image', accountId: 'test', total: 1, concurrency: 1 });
+  const live = global.__backgroundWork.records.get(id);
+  live.data.phase = 'running';
+  live.controller = new AbortController();
+  const remove = (id, kind) => route.DELETE(new Request('http://test/api/activity?' + new URLSearchParams({ id, kind }), { method: 'DELETE' }));
+  assert.equal((await remove(id, 'image')).status, 409);
+  assert.equal(live.controller.signal.aborted, false);
+  assert.ok(fs.existsSync(work.workDir(id)));
+  live.data.phase = 'done';
+  assert.equal((await remove(id, 'image')).status, 409);
+  live.controller = undefined;
+  fs.writeFileSync(path.join(work.workDir(id), 'result-0.json'), 'saved image');
+  assert.equal((await remove(id, 'image')).status, 200);
+  assert.equal(fs.existsSync(work.workDir(id)), false);
+  assert.equal((await work.listWork()).length, 0);
+  // Cancelled drafts can retain failed upload and write promises.
+  await work.createWork({ id, kind: 'video', accountId: 'test', total: 8, concurrency: 1 });
+  await work.cancelWork(id);
+  await assert.rejects(() => work.uploadWork(id, 0, 0, 1, Buffer.from('x')), /no longer accepting uploads/);
+  const draft = global.__backgroundWork.records.get(id);
+  draft.writes = Promise.reject(new Error('Earlier write failure'));
+  await draft.writes.catch(() => {});
+  assert.equal((await remove(id, 'video')).status, 200);
+  assert.equal(fs.existsSync(work.workDir(id)), false);
+  assert.equal((await work.listWork()).length, 0);
+  const active = await jobs.createJob();
+  active.status.phase = 'rendering'; active.controller = new AbortController();
+  fs.writeFileSync(path.join(active.dir, 'output.mp4'), 'active render');
+  const done = await jobs.createJob(); done.status.phase = 'done';
+  fs.writeFileSync(path.join(done.dir, 'output.mp4'), 'finished render');
+  assert.equal((await remove(active.id, 'render')).status, 409);
+  assert.equal((await remove(done.id, 'render')).status, 200);
+  assert.equal(fs.existsSync(done.dir), false);
+  assert.equal(jobs.getJob(done.id), undefined);
+  assert.equal(active.controller.signal.aborted, false);
+  assert.equal(fs.readFileSync(path.join(active.dir, 'output.mp4'), 'utf8'), 'active render');
+  assert.equal((await remove('../outside', 'image')).status, 409);
+  assert.equal((await remove('../outside', 'render')).status, 409);
+  console.log('PASS: settled history and files deleted; active jobs and controllers untouched; invalid paths rejected');
+}
+main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => {
+  const target = path.resolve(scratch);
+  if (path.dirname(target) !== path.resolve(os.tmpdir()) || !path.basename(target).startsWith('activity-delete-check-')) throw Error('Unsafe test cleanup');
+  fs.rmSync(target, { recursive: true, force: true });
+});
